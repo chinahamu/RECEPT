@@ -6,7 +6,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PatientRecord } from './types/receipt';
 import type { ClaimPreview, Workspace, WorkspaceAction, WorkspaceResult } from './types/workspace';
-import { CLINIC_FACILITY_INFO, DEMO_MONTH } from './data/mhlwMaster';
+import { CLINIC_FACILITY_INFO, DEMO_MONTH } from './data/demoWorkspace';
+import { OFFICIAL_MASTERS, type MasterKind } from './data/officialMasters';
 import { ApiError, requestJson } from './utils/workspaceApi';
 import { EncounterWorkstation } from './components/EncounterWorkstation';
 import { BatchAuditConsole } from './components/BatchAuditConsole';
@@ -18,23 +19,12 @@ import { HardDrive, Wifi, WifiOff } from 'lucide-react';
 type ActiveTab = 'workstation' | 'audit' | 'patients' | 'server';
 
 const API = '/api/workspace';
-const LEGACY_STORAGE_KEY = 'recept-demo-v1';
-
-function readLegacyData() {
-  try {
-    return localStorage.getItem(LEGACY_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('workstation');
   const [workspace, setWorkspace] = useState<Workspace>();
   const [storageError, setStorageError] = useState('');
   const [selectedPatientId, setSelectedPatientId] = useState('');
   const [claim, setClaim] = useState<ClaimPreview>();
-  const [legacy, setLegacy] = useState(readLegacyData);
   const pending = useRef(false);
   const [busy, setBusy] = useState(false);
 
@@ -98,22 +88,6 @@ export default function App() {
     }
   }
 
-  async function handleImportLegacy() {
-    if (!legacy || !window.confirm('このブラウザに保存された旧版のデモデータをSQLiteに取り込みますか？')) return;
-    let data;
-    try {
-      data = JSON.parse(legacy);
-      if (!data || typeof data !== 'object') throw new Error();
-    } catch {
-      setStorageError('旧版のブラウザ保存データを読み込めません。');
-      return;
-    }
-    const result = await mutate({
-      type: 'importLegacy', patients: data.patients, activity: data.activity, isOfflineMode: data.isOfflineMode,
-    });
-    if (result) setLegacy(null);
-  }
-
   async function openClaim() {
     const preview = await run(() => requestJson<ClaimPreview>('/api/claim-preview'));
     if (preview) setClaim(preview);
@@ -134,6 +108,8 @@ export default function App() {
   }
 
   const { patients, activity, isOfflineMode } = workspace;
+  const missingMasters = (Object.keys(OFFICIAL_MASTERS) as MasterKind[])
+    .filter((kind) => !workspace.masterKinds.includes(kind));
   const totalErrorCount = patients.reduce((sum, patient) => sum + patient.findings.filter((f) => f.severity === 'error').length, 0);
 
   return (
@@ -239,7 +215,7 @@ export default function App() {
             医療機関コード {CLINIC_FACILITY_INFO.facilityCode}
           </span>
           <span aria-hidden="true">·</span>
-          <span>{CLINIC_FACILITY_INFO.mhlwMasterVersion}</span>
+          <span>公式マスター {workspace.masterKinds.length}/{Object.keys(OFFICIAL_MASTERS).length}種取込済み</span>
         </div>
 
         <div className="flex items-center gap-3">
@@ -276,17 +252,16 @@ export default function App() {
       <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 text-xs text-amber-900">
         開発版 · 架空データ専用。実患者情報の入力、実会計、保険請求への使用はできません。
       </div>
-      {storageError && (
-        <div role="alert" className="bg-red-50 px-6 py-2 text-sm text-red-800">{storageError}</div>
-      )}
-
-      {legacy && workspace.revision === 0 && (
-        <div className="bg-sky-50 px-6 py-2 text-sm text-sky-900">
-          旧版のデモデータがこのブラウザにあります。
-          <button type="button" onClick={handleImportLegacy} disabled={busy} className="ml-2 underline">
-            SQLiteに取り込む
+      {missingMasters.length > 0 && (
+        <div className="bg-sky-50 border-b border-sky-200 px-6 py-2 text-xs text-sky-900">
+          初期セットアップ · 未取り込み {missingMasters.map((kind) => OFFICIAL_MASTERS[kind]).join('、')}
+          <button type="button" className="ml-2 underline" onClick={() => setActiveTab('server')}>
+            公式マスターを取り込む
           </button>
         </div>
+      )}
+      {storageError && (
+        <div role="alert" className="bg-red-50 px-6 py-2 text-sm text-red-800">{storageError}</div>
       )}
 
       {/* Main Content Viewport */}
@@ -331,6 +306,9 @@ export default function App() {
           <LocalServerMasterView
             activity={activity}
             isOfflineMode={isOfflineMode}
+            onImported={(kind) => setWorkspace((current) => current && ({
+              ...current, masterKinds: [...new Set([...current.masterKinds, kind])],
+            }))}
             onToggleOfflineMode={() => mutate({ type: 'toggleOffline' })}
             onResetDemoData={handleResetDemoData}
             onCreateSnapshot={async () => (await mutate({ type: 'snapshot' }))?.workspace}

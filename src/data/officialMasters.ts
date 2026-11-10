@@ -31,3 +31,11 @@ export interface MasterRow {
 }
 
 export const officialFilename = /^(s|y|t|b|z|c|k)(?:_(\d{4})(\d{2})(\d{2}))?\.(?:csv|txt)$/i;
+
+export type DiseaseEntry = MasterRow & Pick<import('../types/receipt').PatientDiagnosis, 'icd10'>;
+export type ProcedureEntry = Pick<import('../types/receipt').BillingLineItem,
+  'code' | 'name' | 'category' | 'categoryName' | 'itemType' | 'points' | 'unit'>;
+export interface ClinicalMasterEntries {
+  b: DiseaseEntry;
+  s: ProcedureEntry;
+}

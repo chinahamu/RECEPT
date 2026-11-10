@@ -5,7 +5,7 @@ import {
   InsuranceCategory,
   PatientRecord,
 } from '../types/receipt';
-import { DEMO_DATE, MHLW_DISEASE_MASTER } from '../data/mhlwMaster';
+import { DEMO_DATE } from '../data/demoWorkspace';
 import type { PatientView } from '../types/workspace';
 
 interface PatientRegistryViewProps {
@@ -32,7 +32,6 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
   const [insurerNumber, setInsurerNumber] = useState('01130012');
   const [symbolNumber, setSymbolNumber] = useState('4510-00128');
   const [copayRatio, setCopayRatio] = useState<CopayRatio>(0.3);
-  const [initialDiseaseCode, setInitialDiseaseCode] = useState(MHLW_DISEASE_MASTER[0].code);
   const [formError, setFormError] = useState<string | null>(null);
 
   const filteredPatients = useMemo(() => {
@@ -64,9 +63,6 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
       return;
     }
 
-    const selectedDisease =
-      MHLW_DISEASE_MASTER.find((d) => d.code === initialDiseaseCode) || MHLW_DISEASE_MASTER[0];
-
     const nextNumber = 1210 + patients.length;
     const newPatient: PatientRecord = {
       id: `pt-${Date.now()}`,
@@ -84,46 +80,8 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
       visitCountThisMonth: 1,
       previousMonthTotalPoints: 0,
       auditStatus: '点検済・適正',
-      diagnoses: [
-        {
-          id: `diag-init-${Date.now()}`,
-          diseaseCode: selectedDisease.code,
-          diseaseName: selectedDisease.name,
-          icd10: selectedDisease.icd10,
-          startDate: DEMO_DATE,
-          outcome: '継続',
-          isMain: true,
-          isSuspected: false,
-        },
-      ],
-      billingItems: [
-        {
-          id: `bi-init-1-${Date.now()}`,
-          code: '111000110',
-          name: '初診料',
-          category: '11',
-          categoryName: '初・再診料',
-          itemType: 'procedure',
-          points: 291,
-          quantity: 1,
-          days: 1,
-          unit: '回',
-          date: DEMO_DATE,
-        },
-        {
-          id: `bi-init-2-${Date.now()}`,
-          code: '111016170',
-          name: '医療DX推進体制整備加算（初診）',
-          category: '11',
-          categoryName: '初・再診料',
-          itemType: 'procedure',
-          points: 11,
-          quantity: 1,
-          days: 1,
-          unit: '回',
-          date: DEMO_DATE,
-        },
-      ],
+      diagnoses: [],
+      billingItems: [],
     };
 
     if (!await onRegisterPatient(newPatient)) return;
@@ -297,23 +255,7 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-end justify-between gap-4 pt-2 border-t border-slate-100">
-            <div className="w-full sm:w-80 text-xs">
-              <label htmlFor="pt-init-diag" className="block font-medium text-slate-700 mb-1">
-                初診時 主傷病名（デモ7桁コード）
-              </label>
-              <select
-                id="pt-init-diag"
-                value={initialDiseaseCode}
-                onChange={(e) => setInitialDiseaseCode(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:border-slate-900"
-              >
-                {MHLW_DISEASE_MASTER.map((d) => (
-                  <option key={d.code} value={d.code}>
-                    {d.name} ({d.code} · ICD10:{d.icd10})
-                  </option>
-                ))}
-              </select>
-            </div>
+            <p className="text-xs text-slate-600">傷病名と診療行為は、登録後に会計・診療入力画面で追加します。</p>
 
             <div className="flex items-center gap-2">
               <button

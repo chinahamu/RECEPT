@@ -8,7 +8,7 @@ import {
   roundCopayToTenYen,
   runMhlwReceiptCheck,
 } from './receiptEngine';
-import { INITIAL_PATIENTS } from '../data/mhlwMaster';
+import { INITIAL_PATIENTS } from '../data/demoWorkspace';
 
 test('roundCopayToTenYen rounds to the nearest ten yen', () => {
   assert.equal(roundCopayToTenYen(1234), 1230);
@@ -32,48 +32,12 @@ test('calculateReceiptPointsAndCopay computes accurate category totals, gross ye
   assert.equal(result.categoryBreakdown['60'].points, 49);
 });
 
-test('runMhlwReceiptCheck detects R06 revision error (特定疾患療養管理料 on hypertension/dyslipidemia) and missing HbA1c indication', () => {
-  const pt1 = INITIAL_PATIENTS[0];
-  const findings = runMhlwReceiptCheck(pt1, '2026-11-10');
-  const ruleCodes = findings.map((f) => f.ruleCode);
-
-  // Should flag R06-001 (特定疾患療養管理料 on lifestyle diseases)
-  assert.ok(ruleCodes.includes('R06-001'), 'Expected R06-001 for 特定疾患療養管理料');
-  // Should flag IND-001 (HbA1c without diabetes diagnosis)
-  assert.ok(ruleCodes.includes('IND-001'), 'Expected IND-001 for HbA1c missing 2型糖尿病');
-});
-
-test('runMhlwReceiptCheck detects concomitant billing error (外来管理加算 + 処置) and drug contraindication (ロキソプロフェン + 胃潰瘍)', () => {
-  const pt2 = INITIAL_PATIENTS[1]; // 山本 美咲
-  const findings = runMhlwReceiptCheck(pt2, '2026-11-10');
-  const ruleCodes = findings.map((f) => f.ruleCode);
-
-  assert.ok(ruleCodes.includes('CON-001'), 'Expected CON-001 for 外来管理加算 + ネブライザ');
-  assert.ok(ruleCodes.includes('DRG-001'), 'Expected DRG-001 for ロキソプロフェン × 胃潰瘍');
-});
-
-test('applyAutoFixToPatient resolves R06-001 and IND-001 findings cleanly', () => {
-  let pt1 = INITIAL_PATIENTS[0];
-  let findings = runMhlwReceiptCheck(pt1, '2026-11-10');
-
-  // Fix R06-001 by switching to 生活習慣病管理料(II)
-  const r06Finding = findings.find((f) => f.ruleCode === 'R06-001');
-  assert.ok(r06Finding?.fixAction);
-  pt1 = applyAutoFixToPatient(pt1, r06Finding.fixAction, '2026-11-10');
-
-  // Fix IND-001 by adding 2型糖尿病
-  findings = runMhlwReceiptCheck(pt1, '2026-11-10');
-  const indFinding = findings.find((f) => f.ruleCode === 'IND-001');
-  assert.ok(indFinding?.fixAction);
-  pt1 = applyAutoFixToPatient(pt1, indFinding.fixAction, '2026-11-10');
-
-  // Verify no errors or warnings remain
-  const finalFindings = runMhlwReceiptCheck(pt1, '2026-11-10');
-  const remainingErrorsOrWarnings = finalFindings.filter(
-    (f) => f.severity === 'error' || f.severity === 'warning'
-  );
-  assert.equal(remainingErrorsOrWarnings.length, 0);
-  assert.equal(pt1.auditStatus, '点検済・適正');
+test('sample concomitant billing finding can be corrected without a master', () => {
+  const patient = INITIAL_PATIENTS[1];
+  const finding = runMhlwReceiptCheck(patient).find((entry) => entry.ruleCode === 'CON-001');
+  assert.ok(finding?.fixAction);
+  const fixed = applyAutoFixToPatient(patient, finding.fixAction);
+  assert.ok(!runMhlwReceiptCheck(fixed).some((entry) => entry.ruleCode === 'CON-001'));
 });
 
 test('generateDemoClaimCsv marks demo data and includes IR, RE, HO, SY, SI, IY, GO records', () => {

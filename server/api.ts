@@ -72,14 +72,17 @@ export function createWorkspaceApi(open = openWorkspace) {
         if (isMasterApi) {
           const params = new URLSearchParams(req.url?.split('?')[1]);
           if (req.method === 'GET') {
+            const kind = params.get('clinical');
             const importId = params.get('id');
             const query = (params.get('q') ?? '').trim();
             const id = Number(importId);
-            if (importId !== null && (!Number.isSafeInteger(id) || id < 1 || query.length > 200)) {
+            if (query.length > 200 || (kind !== null && kind !== 'b' && kind !== 's') ||
+                (importId !== null && (!Number.isSafeInteger(id) || id < 1))) {
               throw new WorkspaceError(400, 'マスターの検索条件が正しくありません。');
             }
             store ??= open();
-            sendJson(res, 200, importId === null ? store.masters.list() : store.masters.search(id, query));
+            sendJson(res, 200, kind ? store.clinical.search(kind, query)
+              : importId === null ? store.masters.list() : store.masters.search(id, query));
           } else if (req.method === 'POST') {
             if (req.headers['content-type'] !== 'application/octet-stream') {
               throw new WorkspaceError(415, '解凍したマスターファイルを送信してください。');

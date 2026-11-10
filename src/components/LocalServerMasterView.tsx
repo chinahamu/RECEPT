@@ -1,10 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import {
-  Database,
   Download,
   HardDrive,
   RefreshCw,
-  Search,
   Server,
   ShieldCheck,
   Wifi,
@@ -13,15 +11,13 @@ import {
 import type { LocalActivityEntry } from '../types/receipt';
 import type { Workspace } from '../types/workspace';
 import { OfficialMasterImports } from './OfficialMasterImports';
-import {
-  CLINIC_FACILITY_INFO,
-  MHLW_DISEASE_MASTER,
-  MHLW_PROCEDURE_MASTER,
-} from '../data/mhlwMaster';
+import { CLINIC_FACILITY_INFO } from '../data/demoWorkspace';
+import type { MasterKind } from '../data/officialMasters';
 
 interface LocalServerMasterViewProps {
   activity: LocalActivityEntry[];
   isOfflineMode: boolean;
+  onImported: (kind: MasterKind) => void;
   onToggleOfflineMode: () => void;
   onResetDemoData: () => void;
   onCreateSnapshot: () => Promise<Workspace | undefined>;
@@ -31,34 +27,11 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
   activity,
   isOfflineMode,
   onToggleOfflineMode,
+  onImported,
   onResetDemoData,
   onCreateSnapshot,
 }) => {
-  const [masterTab, setMasterTab] = useState<'PROCEDURE' | 'DISEASE'>('PROCEDURE');
-  const [masterSearch, setMasterSearch] = useState('');
   const [snapshotMessage, setSnapshotMessage] = useState<string | null>(null);
-
-  const filteredProcedureMaster = useMemo(() => {
-    const q = masterSearch.trim().toLowerCase();
-    if (!q) return MHLW_PROCEDURE_MASTER;
-    return MHLW_PROCEDURE_MASTER.filter(
-      (m) =>
-        m.name.toLowerCase().includes(q) ||
-        m.code.includes(q) ||
-        m.categoryName.toLowerCase().includes(q)
-    );
-  }, [masterSearch]);
-
-  const filteredDiseaseMaster = useMemo(() => {
-    const q = masterSearch.trim().toLowerCase();
-    if (!q) return MHLW_DISEASE_MASTER;
-    return MHLW_DISEASE_MASTER.filter(
-      (d) =>
-        d.name.toLowerCase().includes(q) ||
-        d.code.includes(q) ||
-        d.icd10.toLowerCase().includes(q)
-    );
-  }, [masterSearch]);
 
   const handleDownloadSnapshot = async () => {
     const snapshot = await onCreateSnapshot();
@@ -96,7 +69,7 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-4">
           <div>
             <h1 className="text-base font-bold text-slate-900">
-              院内サーバー・マスタ（デモ）
+              院内サーバー・マスタ
             </h1>
             <p className="text-xs text-slate-600 mt-1">
               デモの患者情報と操作履歴は、SQLiteに保存されます。
@@ -155,8 +128,8 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
           </div>
         )}
 
-        {/* 4-Column Server & Master Specification Grid with Hairline Dividers */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 pt-4 mt-2 text-xs">
+        {/* Server storage and connection status */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 pt-4 mt-2 text-xs">
           <div className="py-2 sm:py-0 sm:pr-4">
             <div className="flex items-center gap-1.5 text-slate-600 font-medium">
               <Server className="w-4 h-4 text-slate-800 shrink-0" />
@@ -203,29 +176,16 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
             </div>
           </div>
 
-          <div className="py-2 sm:py-0 sm:pl-4">
-            <div className="flex items-center gap-1.5 text-slate-600 font-medium">
-              <Database className="w-4 h-4 text-slate-800 shrink-0" />
-              <span>収録マスタ</span>
-            </div>
-            <div className="font-semibold text-slate-900 mt-1">
-              {CLINIC_FACILITY_INFO.mhlwMasterVersion}
-            </div>
-            <div className="text-[11px] text-slate-500 mt-1 font-mono tabular-nums">
-              診療行為・薬価 {MHLW_PROCEDURE_MASTER.length}件 · 傷病名 {MHLW_DISEASE_MASTER.length}件
-            </div>
-          </div>
         </div>
       </section>
 
-      <OfficialMasterImports />
+      <OfficialMasterImports onImported={onImported} />
 
-      {/* Split Grid: Activity log and demo master browser */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-        {/* Activity log (5 cols) */}
+      {/* Activity log */}
+      <div className="grid grid-cols-1 gap-5">
         <section
           aria-label="デモ操作履歴"
-          className="lg:col-span-5 bg-white border border-slate-200 rounded-lg p-4 flex flex-col gap-3"
+          className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col gap-3"
         >
           <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-2.5">
             <div>
@@ -272,128 +232,6 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
           </div>
         </section>
 
-        {/* Demo master table (7 cols) */}
-        <section
-          aria-label="デモマスタ一覧"
-          className="lg:col-span-7 bg-white border border-slate-200 rounded-lg p-4 flex flex-col gap-3"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2.5">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-900">
-                レセプト点検用デモマスタ
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                操作確認に使う診療行為・傷病名・算定ルールのサンプル
-              </p>
-            </div>
-
-            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-md">
-              <button
-                type="button"
-                onClick={() => setMasterTab('PROCEDURE')}
-                className={`px-3 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                  masterTab === 'PROCEDURE'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                診療行為・医薬品マスタ ({MHLW_PROCEDURE_MASTER.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setMasterTab('DISEASE')}
-                className={`px-3 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                  masterTab === 'DISEASE'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                傷病名マスタ ({MHLW_DISEASE_MASTER.length})
-              </button>
-            </div>
-          </div>
-
-          <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="search"
-              aria-label="デモマスタ検索"
-              value={masterSearch}
-              onChange={(e) => setMasterSearch(e.target.value)}
-              placeholder="コード・名称・ICD10・区分で検索..."
-              className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:border-slate-900"
-            />
-          </div>
-
-          <div className="border border-slate-200 rounded-md overflow-x-auto max-h-[420px] overflow-y-auto">
-            {masterTab === 'PROCEDURE' ? (
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                    <th className="py-2 px-2.5 font-medium font-mono whitespace-nowrap">9桁電算コード</th>
-                    <th className="py-2 px-2 font-medium whitespace-nowrap">区分</th>
-                    <th className="py-2 px-2.5 font-medium">名称 / 改定・算定ルール備考</th>
-                    <th className="py-2 px-2.5 text-right font-medium whitespace-nowrap">点数</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredProcedureMaster.map((m) => (
-                    <tr key={m.code} className="hover:bg-slate-50">
-                      <td className="py-2 px-2.5 font-mono tabular-nums text-slate-700 whitespace-nowrap">
-                        {m.code}
-                      </td>
-                      <td className="py-2 px-2 text-slate-600 whitespace-nowrap">
-                        {m.category}:{m.categoryName}
-                      </td>
-                      <td className="py-2 px-2.5">
-                        <div className="font-medium text-slate-900">{m.name}</div>
-                        {m.revisionNote && (
-                          <div className="text-[11px] text-slate-500 mt-0.5">
-                            {m.revisionNote}
-                          </div>
-                        )}
-                      </td>
-                      <td className="py-2 px-2.5 text-right font-mono tabular-nums font-semibold text-slate-900 whitespace-nowrap">
-                        {m.points}点 / {m.unit}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                    <th className="py-2 px-2.5 font-medium font-mono">7桁傷病名コード</th>
-                    <th className="py-2 px-2.5 font-medium">傷病名</th>
-                    <th className="py-2 px-2 font-medium font-mono">ICD-10</th>
-                    <th className="py-2 px-2.5 font-medium">管理料対象区分（デモ）</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredDiseaseMaster.map((d) => (
-                    <tr key={d.code} className="hover:bg-slate-50">
-                      <td className="py-2 px-2.5 font-mono tabular-nums text-slate-700">
-                        {d.code}
-                      </td>
-                      <td className="py-2 px-2.5 font-medium text-slate-900">{d.name}</td>
-                      <td className="py-2 px-2 font-mono tabular-nums text-slate-600">
-                        {d.icd10}
-                      </td>
-                      <td className="py-2 px-2.5 text-slate-700">
-                        {d.isTargetOfSeikatsuShukan
-                          ? '生活習慣病管理料(I)/(II) 対象（特定疾患療養管理料は対象外）'
-                          : d.isTargetOfTokuteiShikkan
-                          ? '特定疾患療養管理料（225点）対象疾患'
-                          : '一般傷病（管理料対象外）'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </section>
       </div>
     </div>
   );

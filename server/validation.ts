@@ -7,7 +7,7 @@ const diagnosis = z.object({
   id,
   diseaseCode: z.string().regex(/^\d{7}$/),
   diseaseName: text,
-  icd10: text,
+  icd10: z.string().max(250),
   startDate: date,
   outcome: z.enum(['継続', '治癒', '中止', '移行']),
   isMain: z.boolean(),
@@ -57,14 +57,6 @@ const patient = z.object({
   notes: z.string().max(4000).optional(),
 });
 
-const activity = z.object({
-  id,
-  timestamp: text,
-  actionType: z.enum(['BILLING_UPDATE', 'DIAGNOSIS_ADD', 'AUDIT_AUTO_FIX', 'PATIENT_REGISTER', 'CSV_EXPORT', 'BACKUP_SNAPSHOT']),
-  patientChartNumber: text,
-  summary: z.string().min(1).max(2500),
-});
-
 export const requestSchema = z.object({
   revision: z.number().int().nonnegative(),
   action: z.discriminatedUnion('type', [
@@ -73,13 +65,6 @@ export const requestSchema = z.object({
     z.object({ type: z.literal('finalize'), patientId: id }),
     z.object({ type: z.literal('fix'), patientId: id, findingId: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/) }),
     z.object({ type: z.literal(['batchFix', 'toggleOffline', 'reset', 'exportCsv', 'snapshot']) }),
-    z.object({
-      type: z.literal('importLegacy'),
-      patients: z.array(patient).min(1).max(250)
-        .refine((items) => unique(items, (item) => item.id) && unique(items, (item) => item.chartNumber)),
-      activity: z.array(activity).max(50),
-      isOfflineMode: z.boolean(),
-    }),
   ]),
 });
 

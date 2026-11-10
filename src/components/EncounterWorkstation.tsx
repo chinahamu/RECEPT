@@ -16,11 +16,8 @@ import {
   PatientDiagnosis,
   PatientRecord,
 } from '../types/receipt';
-import {
-  DEMO_DATE,
-  MHLW_DISEASE_MASTER,
-  MHLW_PROCEDURE_MASTER,
-} from '../data/mhlwMaster';
+import { DEMO_DATE } from '../data/demoWorkspace';
+import { useClinicalMasterSearch } from '../utils/clinicalMasterSearch';
 import type { PatientView } from '../types/workspace';
 
 interface EncounterWorkstationProps {
@@ -44,10 +41,11 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
 }) => {
   const [patientQuery, setPatientQuery] = useState('');
   const [procedureQuery, setProcedureQuery] = useState('');
-  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('ALL');
-  const [selectedDiseaseCodeToAdd, setSelectedDiseaseCodeToAdd] = useState<string>(
-    MHLW_DISEASE_MASTER[0].code
-  );
+  const [diseaseQuery, setDiseaseQuery] = useState('');
+  const [selectedDiseaseCodeToAdd, setSelectedDiseaseCodeToAdd] = useState('');
+  const { entries: diseases, error: diseaseError } = useClinicalMasterSearch('b', diseaseQuery);
+  const { entries: filteredProcedures, error: procedureError } = useClinicalMasterSearch('s', procedureQuery);
+  const selectedDisease = diseases.find((entry) => entry.code === selectedDiseaseCodeToAdd);
   const [newDiagSuspected, setNewDiagSuspected] = useState(false);
   const [editingCommentItemId, setEditingCommentItemId] = useState<string | null>(null);
   const [commentInputText, setCommentInputText] = useState<string>('');
@@ -69,25 +67,11 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
     );
   }, [patients, patientQuery]);
 
-  const filteredProcedures = useMemo(() => {
-    const q = procedureQuery.trim().toLowerCase();
-    return MHLW_PROCEDURE_MASTER.filter((m) => {
-      const matchesCat =
-        selectedCategoryFilter === 'ALL' || m.category === selectedCategoryFilter;
-      const matchesQuery =
-        !q ||
-        m.name.toLowerCase().includes(q) ||
-        m.code.includes(q) ||
-        m.categoryName.toLowerCase().includes(q);
-      return matchesCat && matchesQuery;
-    });
-  }, [procedureQuery, selectedCategoryFilter]);
-
   const { calculation, findings: auditFindings } = selectedPatient;
 
   const handleAddDiagnosis = (e: React.FormEvent) => {
     e.preventDefault();
-    const master = MHLW_DISEASE_MASTER.find((d) => d.code === selectedDiseaseCodeToAdd);
+    const master = selectedDisease;
     if (!master) return;
 
     if (selectedPatient.diagnoses.some((d) => d.diseaseCode === master.code && d.outcome === '継続')) {
@@ -133,7 +117,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
   };
 
   const handleAddBillingItem = (masterCode: string) => {
-    const master = MHLW_PROCEDURE_MASTER.find((m) => m.code === masterCode);
+    const master = filteredProcedures.find((m) => m.code === masterCode);
     if (!master) return;
 
     const newItem: BillingLineItem = {
@@ -145,7 +129,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
       itemType: master.itemType,
       points: master.points,
       quantity: 1,
-      days: master.itemType === 'drug' ? 14 : 1,
+      days: 1,
       unit: master.unit,
       date: DEMO_DATE,
     };
@@ -190,7 +174,6 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
       item.id === itemId
         ? {
             ...item,
-            commentCode: item.commentCode || '830100001',
             commentText: commentInputText.trim(),
           }
         : item
@@ -464,17 +447,24 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
               </table>
             </div>
 
-            {/* Quick Add Diagnosis Form */}
+            <label className="mt-2 block text-xs text-slate-600">
+              公式傷病名マスターを検索
+              <input type="search" value={diseaseQuery} maxLength={200}
+                onChange={(e) => { setDiseaseQuery(e.target.value); setSelectedDiseaseCodeToAdd(''); }}
+                placeholder="名称・7桁コード" className="ml-2 rounded border border-slate-200 px-2 py-1" />
+            </label>
+            {diseaseError && <p role="alert" className="text-xs text-red-700">{diseaseError}</p>}
             <form onSubmit={handleAddDiagnosis} className="mt-2.5 flex flex-wrap items-center gap-2">
               <select
                 aria-label="追加する傷病名を選択"
-                value={selectedDiseaseCodeToAdd}
+                value={selectedDisease?.code ?? ''}
                 onChange={(e) => setSelectedDiseaseCodeToAdd(e.target.value)}
                 className="flex-1 min-w-[200px] bg-slate-50 border border-slate-200 rounded-md px-2.5 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-slate-900"
               >
-                {MHLW_DISEASE_MASTER.map((d) => (
+                <option value="">{diseases.length ? '傷病名を選択（最大50件）' : '選択できる傷病名がありません'}</option>
+                {diseases.map((d) => (
                   <option key={d.code} value={d.code}>
-                    {d.name} ({d.code} · {d.category})
+                    {d.name} ({d.code})
                   </option>
                 ))}
               </select>
@@ -489,7 +479,8 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
               </label>
               <button
                 type="submit"
-                className="px-3 py-1.5 bg-slate-900 text-white text-xs font-medium rounded-md hover:bg-slate-800 transition-colors inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                disabled={!selectedDisease}
+                className="disabled:opacity-50 px-3 py-1.5 bg-slate-900 text-white text-xs font-medium rounded-md hover:bg-slate-800 transition-colors inline-flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>傷病名追加</span>
@@ -636,48 +627,24 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
 
           {/* MHLW Master Quick Picker */}
           <div className="pt-2 border-t border-slate-100">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-              <span className="text-xs font-semibold text-slate-800">
-                デモマスタから診療行為・処方薬を追加
-              </span>
-              <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-md">
-                {[
-                  { code: 'ALL', label: 'すべて' },
-                  { code: '11', label: '11:初再診' },
-                  { code: '13', label: '13:医学管理' },
-                  { code: '21', label: '21:投薬' },
-                  { code: '40', label: '40:処置' },
-                  { code: '60', label: '60:検査' },
-                ].map((tab) => (
-                  <button
-                    key={tab.code}
-                    type="button"
-                    onClick={() => setSelectedCategoryFilter(tab.code)}
-                    className={`px-2 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                      selectedCategoryFilter === tab.code
-                        ? 'bg-white text-slate-900 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <p className="mb-2 text-xs font-semibold text-slate-800">公式マスターから固定点数の医科診療行為を追加</p>
 
             <div className="relative mb-2">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="search"
-                aria-label="診療行為・医薬品マスタ検索"
+                aria-label="医科診療行為マスター検索"
+                maxLength={200}
                 value={procedureQuery}
                 onChange={(e) => setProcedureQuery(e.target.value)}
-                placeholder="診療行為名・薬品名・9桁コードで検索（例: 生活習慣病管理料, ロキソプロフェン, HbA1c）..."
+                placeholder="診療行為名・9桁コードで検索（最大50件）"
                 className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:border-slate-900"
               />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-1">
+              {procedureError && <p role="alert" className="text-xs text-red-700">{procedureError}</p>}
+              {!procedureError && !filteredProcedures.length && <p className="text-xs text-slate-500">選択できる診療行為がありません。</p>}
               {filteredProcedures.map((proc) => (
                 <button
                   key={proc.code}
@@ -795,7 +762,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                 リアルタイム自動レセプト点検
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                令和6年度改定・適応傷病名・併算定・縦覧・別表Iコメント検証
+                診療行為の併算定と長期疑い病名のデモ点検
               </p>
             </div>
             <span

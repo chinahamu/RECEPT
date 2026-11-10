@@ -1,3 +1,4 @@
+import type { MasterKind } from '../data/officialMasters';
 import type {
   AuditFinding, BillingLineItem, LocalActivityEntry, PatientDiagnosis,
   PatientRecord, ReceiptCalculationResult,
@@ -11,6 +12,7 @@ export interface PatientView extends PatientRecord {
 
 export interface Workspace {
   revision: number;
+  masterKinds: MasterKind[];
   patients: PatientView[];
   activity: LocalActivityEntry[];
   isOfflineMode: boolean;
@@ -27,8 +29,7 @@ export type WorkspaceAction =
   | { type: 'update'; patientId: string; diagnoses: PatientDiagnosis[]; billingItems: BillingLineItem[]; summary: string }
   | { type: 'finalize'; patientId: string }
   | { type: 'fix'; patientId: string; findingId: string }
-  | { type: 'batchFix' | 'toggleOffline' | 'reset' | 'exportCsv' | 'snapshot' }
-  | { type: 'importLegacy'; patients: unknown; activity: unknown; isOfflineMode: unknown };
+  | { type: 'batchFix' | 'toggleOffline' | 'reset' | 'exportCsv' | 'snapshot' };
 
 export interface WorkspaceResult {
   workspace: Workspace;

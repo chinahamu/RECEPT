@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import type { AuditFinding } from '../types/receipt';
 import type { PatientView } from '../types/workspace';
-import { CLINIC_FACILITY_INFO, DEMO_MONTH } from '../data/mhlwMaster';
+import { CLINIC_FACILITY_INFO, DEMO_MONTH } from '../data/demoWorkspace';
 
 interface BatchAuditConsoleProps {
   patients: PatientView[];
@@ -132,7 +132,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
             {summaryStats.totalErrors} <span className="text-xs font-normal">件</span>
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            令和6年改定・適応病名・禁忌チェック
+            診療行為の併算定と長期疑い病名のデモ点検
           </div>
         </div>
 

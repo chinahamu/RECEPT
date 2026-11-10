@@ -11,11 +11,9 @@ import {
   CLINIC_FACILITY_INFO,
   DEMO_DATE,
   DEMO_MONTH,
-  MHLW_DISEASE_MASTER,
-  MHLW_PROCEDURE_MASTER,
-} from '../data/mhlwMaster';
+} from '../data/demoWorkspace';
 
-const CATEGORY_LABELS: Record<typeBillingCategoryCode, string> = {
+export const CATEGORY_LABELS: Record<typeBillingCategoryCode, string> = {
   '11': '初・再診料',
   '12': '医学管理等',
   '13': '医学管理等',
@@ -106,68 +104,12 @@ export function runMhlwReceiptCheck(
   const activeDiagnoses = patient.diagnoses.filter(
     (d) => d.outcome !== '治癒' && d.outcome !== '中止'
   );
-  const activeDiseaseCodes = new Set(activeDiagnoses.map((d) => d.diseaseCode));
-  const billingCodes = new Set(patient.billingItems.map((b) => b.code));
 
-  // Rule 1: 令和6年6月診療報酬改定 特定疾患療養管理料（113001810）の対象疾患除外チェック
-  const tokuteiItem = patient.billingItems.find((b) => b.code === '113001810');
-  if (tokuteiItem) {
-    const hasValidTokuteiDisease = activeDiagnoses.some((d) => {
-      const master = MHLW_DISEASE_MASTER.find((m) => m.code === d.diseaseCode);
-      return master?.isTargetOfTokuteiShikkan === true;
-    });
-    const hasLifestyleDisease = activeDiagnoses.some((d) => {
-      const master = MHLW_DISEASE_MASTER.find((m) => m.code === d.diseaseCode);
-      return master?.isTargetOfSeikatsuShukan === true;
-    });
-
-    if (!hasValidTokuteiDisease && hasLifestyleDisease) {
-      findings.push({
-        id: `chk-r06-tokutei-${patient.id}`,
-        ruleCode: 'R06-001',
-        severity: 'error',
-        category: '令和6年改定・算定要件',
-        title: '特定疾患療養管理料の対象外傷病名（令和6年6月改定）',
-        description:
-          '高血圧症・脂質異常症・糖尿病は令和6年6月診療報酬改定により「特定疾患療養管理料（225点）」の対象から除外されました。対象特定疾患（気管支喘息・慢性心不全・慢性胃炎等）の登録がないため返戻・査定対象となります。「生活習慣病管理料(II)（333点）」への算定切替を推奨します。',
-        mhlwReference: '保医発0305第4号 別表1 特定疾患療養管理料・生活習慣病管理料(II)算定留意事項',
-        impactPoints: 225,
-        relatedItemId: tokuteiItem.id,
-        fixAction: {
-          type: 'replace_item',
-          label: '生活習慣病管理料(II)（333点）へ切替',
-          targetItemId: tokuteiItem.id,
-          replacementCode: '113046410',
-          commentCode: '830100802',
-          commentText: '療養計画書交付・患者署名同意済（生活習慣指導実施）',
-        },
-      });
-    } else if (!hasValidTokuteiDisease) {
-      findings.push({
-        id: `chk-r06-tokutei-none-${patient.id}`,
-        ruleCode: 'R06-002',
-        severity: 'error',
-        category: '令和6年改定・算定要件',
-        title: '特定疾患療養管理料の対象傷病名未登録',
-        description:
-          '特定疾患療養管理料（225点）が算定されていますが、厚生労働大臣が定める対象特定疾患が傷病名欄に登録されていません。',
-        mhlwReference: '医科診療報酬点数表 B000 特定疾患療養管理料',
-        impactPoints: 225,
-        relatedItemId: tokuteiItem.id,
-        fixAction: {
-          type: 'remove_item',
-          label: '特定疾患療養管理料を算定から削除',
-          targetItemId: tokuteiItem.id,
-        },
-      });
-    }
-  }
-
-  // Rule 2: 外来管理加算（112011310）と処置（区分40）または生活習慣病管理料の併算定不可チェック
-  const gairaiKanriItem = patient.billingItems.find((b) => b.code === '112011310');
+  // 外来管理加算（112011010）と処置（区分40）または生活習慣病管理料の併算定不可チェック
+  const gairaiKanriItem = patient.billingItems.find((b) => b.code === '112011010');
   if (gairaiKanriItem) {
-    const procedure40Item = patient.billingItems.find((b) => b.category === '40');
-    const seikatsuItem = patient.billingItems.find((b) => b.code === '113046410');
+    const procedure40Item = patient.billingItems.find((b) => b.category === '40' && b.date === gairaiKanriItem.date);
+    const seikatsuItem = patient.billingItems.find((b) => b.name.startsWith('生活習慣病管理料'));
     if (procedure40Item) {
       findings.push({
         id: `chk-con-gairai-${patient.id}`,
@@ -178,7 +120,7 @@ export function runMhlwReceiptCheck(
         description:
           '外来管理加算は処置・リハビリテーション等を行わずに計画的な医学管理を行った場合に算定可能です。同日に区分40（処置）が算定されているため併算定不可です。',
         mhlwReference: '医科点数表 A001 再診料 注8 外来管理加算算定要件',
-        impactPoints: 52,
+        impactPoints: calculateLineItemPoints(gairaiKanriItem),
         relatedItemId: gairaiKanriItem.id,
         fixAction: {
           type: 'remove_item',
@@ -196,7 +138,7 @@ export function runMhlwReceiptCheck(
         description:
           '生活習慣病管理料(II)には外来管理加算の費用が包括されているため、同一月に併算定することはできません。',
         mhlwReference: '医科点数表 B001-3 生活習慣病管理料(II) 注3',
-        impactPoints: 52,
+        impactPoints: calculateLineItemPoints(gairaiKanriItem),
         relatedItemId: gairaiKanriItem.id,
         fixAction: {
           type: 'remove_item',
@@ -207,129 +149,29 @@ export function runMhlwReceiptCheck(
     }
   }
 
-  // Rule 3: 初診料と再診料の同日重複チェック
-  if (billingCodes.has('111000110') && billingCodes.has('112007410')) {
-    const saishin = patient.billingItems.find((b) => b.code === '112007410');
+  // 初診料と再診料の同日重複チェック
+  const firstVisitDates = new Set(patient.billingItems.filter((item) => item.code === '111000110').map((item) => item.date));
+  const saishin = patient.billingItems.find((item) => item.code === '112007410' && firstVisitDates.has(item.date));
+  if (saishin) {
     findings.push({
       id: `chk-con-shoshin-saishin-${patient.id}`,
       ruleCode: 'CON-003',
       severity: 'error',
       category: '併算定・回数制限',
       title: '初診料と再診料の同日重複算定',
-      description: '同一受診日において初診料（291点）と再診料（75点）が重複して算定されています。',
+      description: '同一受診日において初診料と再診料が重複して算定されています。',
       mhlwReference: '医科点数表 A000 初診料・A001 再診料',
-      impactPoints: 75,
-      relatedItemId: saishin?.id,
-      fixAction: saishin
-        ? {
-            type: 'remove_item',
-            label: '重複している再診料（75点）を削除',
-            targetItemId: saishin.id,
-          }
-        : undefined,
+      impactPoints: calculateLineItemPoints(saishin),
+      relatedItemId: saishin.id,
+      fixAction: {
+        type: 'remove_item',
+        label: '重複している再診料を削除',
+        targetItemId: saishin.id,
+      },
     });
   }
 
-  // Rule 4: 各診療行為・医薬品の適応傷病名チェック、禁忌傷病名チェック、必須コメントチェック、月内回数上限チェック
-  for (const item of patient.billingItems) {
-    const master = MHLW_PROCEDURE_MASTER.find((m) => m.code === item.code);
-    if (!master) continue;
-
-    // 4-A: 禁忌傷病名チェック（例：ロキソプロフェンNa錠 × 胃潰瘍）
-    if (master.excludedIndications && master.code !== '113001810') {
-      const contraindicatedDiag = activeDiagnoses.find((d) =>
-        master.excludedIndications!.includes(d.diseaseCode)
-      );
-      if (contraindicatedDiag) {
-        findings.push({
-          id: `chk-contra-${item.id}`,
-          ruleCode: 'DRG-001',
-          severity: 'error',
-          category: '適応傷病名不一致',
-          title: `禁忌傷病名抵触：「${item.name}」×「${contraindicatedDiag.diseaseName}」`,
-          description: `登録傷病名に「${contraindicatedDiag.diseaseName}（継続）」が存在するため、「${item.name}」は消化性潰瘍禁忌として審査支払機関で査定対象となります。`,
-          mhlwReference: '医療用医薬品添付文書 禁忌項目・支払基金医薬品審査情報',
-          impactPoints: calculateLineItemPoints(item),
-          relatedItemId: item.id,
-          relatedDiagnosisId: contraindicatedDiag.id,
-          fixAction: {
-            type: 'remove_item',
-            label: `禁忌薬「${item.name}」を処方から削除`,
-            targetItemId: item.id,
-          },
-        });
-      }
-    }
-
-    // 4-B: 適応傷病名漏れチェック
-    if (master.requiredIndications && master.requiredIndications.length > 0 && master.code !== '113001810') {
-      const hasIndication = master.requiredIndications.some((reqCode) =>
-        activeDiseaseCodes.has(reqCode)
-      );
-      if (!hasIndication) {
-        const primaryCandidateCode = master.requiredIndications[0];
-        const candidateDisease = MHLW_DISEASE_MASTER.find((d) => d.code === primaryCandidateCode);
-        const candidateName = candidateDisease ? candidateDisease.name : primaryCandidateCode;
-
-        findings.push({
-          id: `chk-ind-${item.id}`,
-          ruleCode: 'IND-001',
-          severity: 'error',
-          category: '適応傷病名不一致',
-          title: `適応傷病名漏れ：「${item.name}」に対する傷病名未登録`,
-          description: `「${item.name}（${calculateLineItemPoints(item)}点）」が算定されていますが、適応となる傷病名（例：${candidateName}）が傷病名欄に登録されていません。`,
-          mhlwReference: '厚生労働省 電算処理レセプト傷病名・診療行為適応突合テーブル',
-          impactPoints: calculateLineItemPoints(item),
-          relatedItemId: item.id,
-          fixAction: {
-            type: 'add_diagnosis',
-            label: `適応傷病名「${candidateName}」を傷病名欄に追加`,
-            diseaseCodeToAdd: primaryCandidateCode,
-          },
-        });
-      }
-    }
-
-    // 4-C: 別表I 選択式コメントコード必須チェック
-    if (master.requiresComment && !item.commentText && !item.commentCode) {
-      const [defaultCode, defaultText] = (master.defaultCommentTemplate || '830100001: 算定事由記載済').split(': ');
-      findings.push({
-        id: `chk-cmt-${item.id}`,
-        ruleCode: 'CMT-001',
-        severity: 'warning',
-        category: 'コメント記載漏れ',
-        title: `電算レセプト選択式コメント未記載：「${item.name}」`,
-        description: `「${item.name}」は診療報酬明細書（レセプト）摘要欄への厚労省別表Iコメントコード記載が義務付けられています。未記載の場合、返戻対象となるリスクがあります。`,
-        mhlwReference: '「診療報酬明細書の記載要領」別表I（選択式コメントコード一覧）',
-        impactPoints: calculateLineItemPoints(item),
-        relatedItemId: item.id,
-        fixAction: {
-          type: 'add_comment',
-          label: `標準コメント（${defaultCode}）を自動付与`,
-          targetItemId: item.id,
-          commentCode: defaultCode,
-          commentText: defaultText || master.defaultCommentTemplate,
-        },
-      });
-    }
-
-    // 4-D: 月内算定回数上限チェック
-    if (master.monthlyLimit && item.quantity * item.days > master.monthlyLimit) {
-      findings.push({
-        id: `chk-lim-${item.id}`,
-        ruleCode: 'CON-004',
-        severity: 'error',
-        category: '併算定・回数制限',
-        title: `月内算定回数超過：「${item.name}」（上限 月${master.monthlyLimit}回）`,
-        description: `「${item.name}」は月${master.monthlyLimit}回が算定上限ですが、現在${item.quantity * item.days}回分が計上されています。`,
-        mhlwReference: '医科診療報酬点数表 月内算定回数制限規定',
-        impactPoints: master.points * (item.quantity * item.days - master.monthlyLimit),
-        relatedItemId: item.id,
-      });
-    }
-  }
-
-  // Rule 5: 縦覧点検 — 長期継続中の「疑い病名」チェック（開始日から2ヶ月以上経過）
+  // 縦覧点検 — 長期継続中の「疑い病名」チェック（開始日から2ヶ月以上経過）
   for (const diag of activeDiagnoses) {
     if (diag.isSuspected) {
       const monthsElapsed = getMonthsDifference(diag.startDate, referenceDate);
@@ -354,48 +196,6 @@ export function runMhlwReceiptCheck(
     }
   }
 
-  // Rule 6: 算定漏れ提案 — 内服薬処方があるのに処方箋料（120002910）が未算定
-  const hasOralDrug = patient.billingItems.some((b) => b.itemType === 'drug');
-  const hasPrescriptionFee = billingCodes.has('120002910');
-  if (hasOralDrug && !hasPrescriptionFee) {
-    findings.push({
-      id: `chk-opp-rx-${patient.id}`,
-      ruleCode: 'OPP-001',
-      severity: 'opportunity',
-      category: '算定漏れ提案',
-      title: '算定漏れ候補：院外処方薬に対する「処方箋料（60点）」未計上',
-      description:
-        '投薬区分（21）に内服薬が計上されていますが、「処方箋料（その他）60点」が算定されていません。院外処方の場合は追加算定が可能です。',
-      mhlwReference: '医科点数表 F400 処方箋料',
-      impactPoints: 60,
-      fixAction: {
-        type: 'add_item',
-        label: '処方箋料（60点）を算定明細に追加',
-        itemCodeToAdd: '120002910',
-      },
-    });
-  }
-
-  // Rule 7: 算定漏れ提案 — 再診料算定時に「外来・在宅ベースアップ評価料(I)（2点）」が未算定
-  if (billingCodes.has('112007410') && !billingCodes.has('112026770')) {
-    findings.push({
-      id: `chk-opp-baseup-${patient.id}`,
-      ruleCode: 'OPP-002',
-      severity: 'opportunity',
-      category: '算定漏れ提案',
-      title: '算定漏れ候補：「外来・在宅ベースアップ評価料(I)（2点）」未計上',
-      description:
-        '再診料（75点）算定時、届出済医療機関では令和6年度新設の「外来・在宅ベースアップ評価料(I)（再診時等）2点」を併せて算定可能です。',
-      mhlwReference: '医科点数表 O100 外来・在宅ベースアップ評価料(I)',
-      impactPoints: 2,
-      fixAction: {
-        type: 'add_item',
-        label: 'ベースアップ評価料(I)（2点）を追加',
-        itemCodeToAdd: '112026770',
-      },
-    });
-  }
-
   return findings;
 }
 
@@ -411,90 +211,11 @@ export function applyAutoFixToPatient(
   let updatedBillingItems: BillingLineItem[] = [...patient.billingItems];
 
   switch (fixAction.type) {
-    case 'add_diagnosis': {
-      const diseaseMaster = MHLW_DISEASE_MASTER.find(
-        (d) => d.code === fixAction.diseaseCodeToAdd
-      );
-      if (diseaseMaster && !updatedDiagnoses.some((d) => d.diseaseCode === diseaseMaster.code)) {
-        updatedDiagnoses.push({
-          id: `diag-auto-${Date.now()}-${diseaseMaster.code}`,
-          diseaseCode: diseaseMaster.code,
-          diseaseName: diseaseMaster.name,
-          icd10: diseaseMaster.icd10,
-          startDate: currentDate,
-          outcome: '継続',
-          isMain: updatedDiagnoses.length === 0,
-          isSuspected: false,
-        });
-      }
-      break;
-    }
-
-    case 'replace_item': {
-      const newMaster = MHLW_PROCEDURE_MASTER.find(
-        (m) => m.code === fixAction.replacementCode
-      );
-      if (newMaster && fixAction.targetItemId) {
-        updatedBillingItems = updatedBillingItems.map((item) => {
-          if (item.id !== fixAction.targetItemId) return item;
-          return {
-            ...item,
-            code: newMaster.code,
-            name: newMaster.name,
-            category: newMaster.category,
-            categoryName: newMaster.categoryName,
-            itemType: newMaster.itemType,
-            points: newMaster.points,
-            unit: newMaster.unit,
-            commentCode: fixAction.commentCode,
-            commentText: fixAction.commentText,
-          };
-        });
-      }
-      break;
-    }
-
     case 'remove_item': {
       if (fixAction.targetItemId) {
         updatedBillingItems = updatedBillingItems.filter(
           (item) => item.id !== fixAction.targetItemId
         );
-      }
-      break;
-    }
-
-    case 'add_item': {
-      const masterToAdd = MHLW_PROCEDURE_MASTER.find(
-        (m) => m.code === fixAction.itemCodeToAdd
-      );
-      if (masterToAdd) {
-        updatedBillingItems.push({
-          id: `bi-auto-${Date.now()}-${masterToAdd.code}`,
-          code: masterToAdd.code,
-          name: masterToAdd.name,
-          category: masterToAdd.category,
-          categoryName: masterToAdd.categoryName,
-          itemType: masterToAdd.itemType,
-          points: masterToAdd.points,
-          quantity: 1,
-          days: 1,
-          unit: masterToAdd.unit,
-          date: currentDate,
-        });
-      }
-      break;
-    }
-
-    case 'add_comment': {
-      if (fixAction.targetItemId) {
-        updatedBillingItems = updatedBillingItems.map((item) => {
-          if (item.id !== fixAction.targetItemId) return item;
-          return {
-            ...item,
-            commentCode: fixAction.commentCode || '830100001',
-            commentText: fixAction.commentText || '算定要件確認済',
-          };
-        });
       }
       break;
     }

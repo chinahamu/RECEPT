@@ -2,32 +2,6 @@ export type InsuranceCategory = '社保' | '国保' | '後期高齢者';
 export type CopayRatio = 0.1 | 0.2 | 0.3;
 export type typeBillingCategoryCode = '11' | '12' | '13' | '14' | '21' | '30' | '40' | '60' | '70' | '80';
 
-export interface MhlwProcedureMaster {
-  code: string; // 9-digit MHLW code
-  name: string;
-  category: typeBillingCategoryCode;
-  categoryName: string;
-  points: number;
-  unit: string;
-  itemType: 'procedure' | 'drug' | 'material';
-  requiredIndications?: string[]; // 7-digit disease codes that satisfy indication
-  excludedIndications?: string[]; // 7-digit disease codes excluded (e.g. R6 特定疾患療養管理料 excludes 高血圧/脂質異常/糖尿病)
-  monthlyLimit?: number;
-  requiresComment?: boolean;
-  defaultCommentTemplate?: string;
-  incompatibleWithCodes?: string[];
-  revisionNote?: string;
-}
-
-export interface MhlwDiseaseMaster {
-  code: string; // 7-digit MHLW disease code
-  name: string;
-  icd10: string;
-  category: '生活習慣病' | '特定疾患' | '急性疾患' | '消化器' | '整形・疼痛' | '呼吸器';
-  isTargetOfTokuteiShikkan: boolean; // 特定疾患療養管理料対象か（R6改定後）
-  isTargetOfSeikatsuShukan: boolean; // 生活習慣病管理料対象か（高血圧・脂質異常・糖尿病）
-}
-
 export interface PatientDiagnosis {
   id: string;
   diseaseCode: string;
@@ -58,20 +32,9 @@ export interface BillingLineItem {
 export type AuditSeverity = 'error' | 'warning' | 'opportunity';
 
 export interface AuditFixAction {
-  type:
-    | 'add_diagnosis'
-    | 'replace_item'
-    | 'remove_item'
-    | 'add_item'
-    | 'add_comment'
-    | 'confirm_suspected';
+  type: 'remove_item' | 'confirm_suspected';
   label: string;
   targetItemId?: string;
-  replacementCode?: string;
-  diseaseCodeToAdd?: string;
-  itemCodeToAdd?: string;
-  commentCode?: string;
-  commentText?: string;
   diagnosisId?: string;
 }
 

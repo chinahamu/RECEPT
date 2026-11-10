@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { INITIAL_PATIENTS, MHLW_DISEASE_MASTER, MHLW_PROCEDURE_MASTER } from '../src/data/mhlwMaster';
+import { INITIAL_PATIENTS } from '../src/data/demoWorkspace';
 import type { LocalActivityEntry, PatientRecord } from '../src/types/receipt';
 import type { ClaimPreview, Workspace, WorkspaceResult } from '../src/types/workspace';
 import {
@@ -12,6 +12,8 @@ import {
 import type { ValidRequest } from './validation';
 import { WorkspaceError } from './errors';
 import { officialMasters } from './officialMasters';
+import { clinicalMasters } from './clinicalMasters';
+import type { MasterKind } from '../src/data/officialMasters';
 
 export { WorkspaceError } from './errors';
 
@@ -76,6 +78,7 @@ function workspaceFromDb(db: DatabaseSync): Workspace {
   return {
     revision: Number(settings.revision),
     isOfflineMode: Boolean(settings.offline),
+    masterKinds: db.prepare('SELECT DISTINCT kind FROM master_imports').all().map((row) => row.kind as MasterKind),
     activity: activity.map((row) => JSON.parse(String(row.entry))),
     patients: readPatients(db).map((patient) => ({
       ...patient,
@@ -99,28 +102,27 @@ function evaluated(patient: PatientRecord): PatientRecord {
   return { ...patient, auditStatus: hasIssues ? '要確認' : '点検済・適正' };
 }
 
-function withMasterData(patient: PatientRecord, previous?: PatientRecord): PatientRecord {
+function withMasterData(masters: ReturnType<typeof clinicalMasters>, patient: PatientRecord, previous?: PatientRecord): PatientRecord {
   return {
     ...patient,
     diagnoses: patient.diagnoses.map((diagnosis) => {
       const old = previous?.diagnoses.find((entry) => entry.id === diagnosis.id && entry.diseaseCode === diagnosis.diseaseCode);
-      const master = MHLW_DISEASE_MASTER.find((entry) => entry.code === diagnosis.diseaseCode);
       if (old) return { ...old, outcome: diagnosis.outcome, isMain: diagnosis.isMain, isSuspected: diagnosis.isSuspected };
-      if (!master) throw new WorkspaceError(400, 'デモマスタにない傷病名です。');
+      const master = masters.lookup('b', diagnosis.diseaseCode, diagnosis.startDate);
+      if (!master) throw new WorkspaceError(400, '取り込み済みの公式マスターに登録可能な傷病名がありません。');
       return { ...diagnosis, diseaseName: master.name, icd10: master.icd10 };
     }),
     billingItems: patient.billingItems.map((item) => {
       const old = previous?.billingItems.find((entry) => entry.id === item.id && entry.code === item.code);
-      const master = MHLW_PROCEDURE_MASTER.find((entry) => entry.code === item.code);
-      const source = old ?? master;
-      if (!source) throw new WorkspaceError(400, 'デモマスタにない算定項目です。');
+      const source = old ?? masters.lookup('s', item.code, item.date);
+      if (!source) throw new WorkspaceError(400, '取り込み済みの公式マスターに登録可能な診療行為がありません。');
       const { code, name, category, categoryName, itemType, points, unit } = source;
       return { ...item, code, name, category, categoryName, itemType, points, unit, date: old?.date ?? item.date };
     }),
   };
 }
 
-function applyAction(db: DatabaseSync, action: ValidRequest['action'], revision: number) {
+function applyAction(db: DatabaseSync, masters: ReturnType<typeof clinicalMasters>, action: ValidRequest['action']) {
   switch (action.type) {
     case 'reset':
       replacePatients(db, INITIAL_PATIENTS);
@@ -135,14 +137,6 @@ function applyAction(db: DatabaseSync, action: ValidRequest['action'], revision:
     case 'snapshot':
       record(db, 'BACKUP_SNAPSHOT', 'SYSTEM', 'デモデータのスナップショットJSON出力を要求');
       return;
-    case 'importLegacy':
-      if (revision !== 0) throw new WorkspaceError(409, '旧データは、操作履歴のない新規DBにのみ取り込めます。');
-      replacePatients(db, action.patients.map(evaluated));
-      for (const entry of [...action.activity].reverse()) {
-        db.prepare('INSERT INTO activity (entry) VALUES (?)').run(JSON.stringify(entry));
-      }
-      db.prepare('UPDATE workspace SET offline = ? WHERE id = 1').run(Number(action.isOfflineMode));
-      return;
   }
 
   const patients = readPatients(db);
@@ -150,7 +144,7 @@ function applyAction(db: DatabaseSync, action: ValidRequest['action'], revision:
     if (patients.length >= 250) throw new WorkspaceError(400, 'デモ患者の登録上限に達しました。');
     let chartNumber = 1210 + patients.length;
     while (patients.some((patient) => patient.chartNumber === `PT-${String(chartNumber).padStart(6, '0')}`)) chartNumber++;
-    const patient = evaluated(withMasterData({
+    const patient = evaluated(withMasterData(masters, {
       ...action.patient,
       id: randomUUID(),
       chartNumber: `PT-${String(chartNumber).padStart(6, '0')}`,
@@ -178,7 +172,7 @@ function applyAction(db: DatabaseSync, action: ValidRequest['action'], revision:
   const patient = patients.find((entry) => entry.id === action.patientId);
   if (!patient) throw new WorkspaceError(404, '対象のデモ患者が見つかりません。');
   if (action.type === 'update') {
-    const next = withMasterData({ ...patient, diagnoses: action.diagnoses, billingItems: action.billingItems }, patient);
+    const next = withMasterData(masters, { ...patient, diagnoses: action.diagnoses, billingItems: action.billingItems }, patient);
     writePatient(db, evaluated(next));
     record(db, 'BILLING_UPDATE', patient.chartNumber, action.summary);
   } else if (action.type === 'fix') {
@@ -218,8 +212,10 @@ export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlit
     throw error;
   }
 
+  const clinical = clinicalMasters(db);
   return {
     close: () => db.close(),
+    clinical,
     masters: officialMasters(db, (work) => transaction(db, work, true)),
     read: () => transaction(db, () => workspaceFromDb(db)),
     preview: () => transaction(db, () => claimPreview(workspaceFromDb(db))),
@@ -228,7 +224,7 @@ export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlit
       if (revision !== current) {
         throw new WorkspaceError(409, '別の画面でデータが更新されました。最新データを読み込んでから再操作してください。');
       }
-      applyAction(db, action, revision);
+      applyAction(db, clinical, action);
       db.exec('UPDATE workspace SET revision = revision + 1 WHERE id = 1');
       const workspace = workspaceFromDb(db);
       return action.type === 'exportCsv' ? { workspace, claim: claimPreview(workspace) } : { workspace };

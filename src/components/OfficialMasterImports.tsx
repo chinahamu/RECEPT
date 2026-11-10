@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import {
   MASTER_DISEASE_DOWNLOAD, MASTER_DOWNLOAD, MASTER_GUIDE, MASTER_MAX_BYTES, OFFICIAL_MASTERS,
-  officialFilename, type MasterImport, type MasterRow,
+  officialFilename, type MasterImport, type MasterKind, type MasterRow,
 } from '../data/officialMasters';
 import { requestApi } from '../utils/workspaceApi';
 
@@ -10,7 +10,7 @@ const fieldClass = 'rounded-md border border-slate-300 px-2 py-1.5 text-sm';
 const buttonClass = 'rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50';
 const linkClass = 'text-sky-800 underline underline-offset-2';
 
-export function OfficialMasterImports() {
+export function OfficialMasterImports({ onImported }: { onImported: (kind: MasterKind) => void }) {
   const [imports, setImports] = useState<MasterImport[]>([]);
   const [selectedId, setSelectedId] = useState<number>();
   const [filename, setFilename] = useState('');
@@ -79,6 +79,7 @@ export function OfficialMasterImports() {
       );
       setImports((current) => [entry, ...current.filter((item) => item.id !== entry.id)]
         .sort((a, b) => b.publishedOn.localeCompare(a.publishedOn) || b.id - a.id));
+      onImported(entry.kind);
       setSelectedId(entry.id);
       setSearchText('');
       setQuery('');
@@ -98,7 +99,7 @@ export function OfficialMasterImports() {
       <h2 id="official-master-heading" className="text-sm font-semibold">公式マスターの取り込み・参照</h2>
       <p className="mt-2 text-xs text-slate-600">
         厚生労働省の配布ページから全件版をダウンロードし、ZIPを解凍して、元の名前のCSVまたはTXTを1ファイルずつ選んでください。
-        取り込んだマスターはこの画面で参照できます。診療入力・算定・点検・請求CSVはデモ用です。
+        傷病名と対応する固定点数の医科診療行為は、会計・診療入力画面の新規入力にも使えます。
       </p>
       <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
         <li><a className={linkClass} href={MASTER_DOWNLOAD} target="_blank" rel="noreferrer">厚労省 基本マスター</a></li>
