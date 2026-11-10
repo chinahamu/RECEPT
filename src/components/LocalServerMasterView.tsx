@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import type { LocalActivityEntry } from '../types/receipt';
 import type { Workspace } from '../types/workspace';
+import { OfficialMasterImports } from './OfficialMasterImports';
 import {
   CLINIC_FACILITY_INFO,
   MHLW_DISEASE_MASTER,
@@ -216,6 +217,8 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
           </div>
         </div>
       </section>
+
+      <OfficialMasterImports />
 
       {/* Split Grid: Activity log and demo master browser */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">

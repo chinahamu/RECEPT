@@ -4,14 +4,18 @@ export class ApiError extends Error {
   }
 }
 
-export async function requestJson<T>(url: string, body?: unknown): Promise<T> {
+export function requestJson<T>(url: string, body?: unknown): Promise<T> {
+  return requestApi<T>(url, body === undefined ? undefined : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function requestApi<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(url, body === undefined ? undefined : {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    response = await fetch(url, options);
   } catch {
     throw new Error('RECEPTサーバーに接続できません。起動状態を確認してください。');
   }

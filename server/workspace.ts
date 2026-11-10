@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { INITIAL_PATIENTS, MHLW_DISEASE_MASTER, MHLW_PROCEDURE_MASTER } from '../src/data/mhlwMaster';
@@ -10,12 +10,10 @@ import {
   generateDemoClaimCsv, runMhlwReceiptCheck,
 } from '../src/utils/receiptEngine';
 import type { ValidRequest } from './validation';
+import { WorkspaceError } from './errors';
+import { officialMasters } from './officialMasters';
 
-export class WorkspaceError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message);
-  }
-}
+export { WorkspaceError } from './errors';
 
 type Profile = Omit<PatientRecord, 'diagnoses' | 'billingItems'>;
 
@@ -204,11 +202,13 @@ export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlit
   const db = new DatabaseSync(filename);
   try {
     db.exec('PRAGMA busy_timeout = 3000; PRAGMA foreign_keys = ON');
-    if (db.prepare('PRAGMA application_id').get()?.application_id !== 0x52435054 ||
-        db.prepare('PRAGMA user_version').get()?.user_version !== 1) {
-      throw new WorkspaceError(503, '未対応のSQLiteスキーマです。RECEPT用DBを指定してください。');
-    }
     transaction(db, () => {
+      const version = db.prepare('PRAGMA user_version').get()?.user_version;
+      if (db.prepare('PRAGMA application_id').get()?.application_id !== 0x52435054 ||
+          (version !== 1 && version !== 2)) {
+        throw new WorkspaceError(503, '未対応のSQLiteスキーマです。RECEPT用DBを指定してください。');
+      }
+      if (version === 1) db.exec(readFileSync(new URL('../database/002-official-masters.sql', import.meta.url), 'utf8'));
       if (db.prepare('SELECT seeded FROM workspace WHERE id = 1').get()?.seeded) return;
       replacePatients(db, INITIAL_PATIENTS);
       db.exec('UPDATE workspace SET seeded = 1 WHERE id = 1');
@@ -220,6 +220,7 @@ export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlit
 
   return {
     close: () => db.close(),
+    masters: officialMasters(db, (work) => transaction(db, work, true)),
     read: () => transaction(db, () => workspaceFromDb(db)),
     preview: () => transaction(db, () => claimPreview(workspaceFromDb(db))),
     apply: ({ revision, action }: ValidRequest): WorkspaceResult => transaction(db, () => {

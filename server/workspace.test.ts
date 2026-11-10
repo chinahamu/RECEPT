@@ -129,9 +129,11 @@ test('workspace HTTP middleware serves JSON and rejects cross-origin or malforme
   const api = createWorkspaceApi(() => openWorkspace(filename));
   t.after(api.close);
   function request(url: string, method: string, value?: unknown, origin?: string) {
-    const req = Object.assign(Readable.from(value === undefined ? [] : [Buffer.from(JSON.stringify(value))]), {
+    const raw = Buffer.isBuffer(value);
+    const body = raw ? value : Buffer.from(JSON.stringify(value ?? null));
+    const req = Object.assign(Readable.from(value === undefined ? [] : [body]), {
       url, method,
-      headers: { host: 'localhost:5173', 'content-type': 'application/json', origin },
+      headers: { host: 'localhost:5173', 'content-type': raw ? 'application/octet-stream' : 'application/json', origin },
       socket: { remoteAddress: '127.0.0.1' },
     });
     return new Promise<{ status: number; data: any }>((resolve, reject) => {
@@ -150,4 +152,25 @@ test('workspace HTTP middleware serves JSON and rejects cross-origin or malforme
   assert.equal(result.status, 200);
   assert.equal(result.data.workspace.isOfflineMode, true);
   assert.match((await request('/api/claim-preview', 'GET')).data.csv, /^DEMO,/);
+
+  const masterUrl = '/api/official-masters';
+  const uploadUrl = `${masterUrl}?filename=c_20261110.csv&publishedOn=2026-11-10`;
+  const comment = Array<string>(30).fill('0');
+  comment.splice(1, 6, 'C', '8', '10', '1', '0', '');
+  comment[22] = '810000001';
+  const valid = Buffer.from(comment.map((field) => `"${field}"`).join(',') + '\r\n');
+  assert.equal((await request(uploadUrl, 'POST', valid, 'https://example.org')).status, 403);
+  assert.equal((await request(uploadUrl, 'POST', Buffer.concat([valid, Buffer.from('invalid')]))).status, 400);
+  assert.deepEqual((await request(masterUrl, 'GET')).data, []);
+
+  const imported = await request(uploadUrl, 'POST', valid);
+  assert.equal(imported.status, 200);
+  assert.equal(imported.data.entry.rowCount, 1);
+  assert.equal((await request(uploadUrl, 'POST', valid)).data.duplicate, true);
+  assert.deepEqual((await request(`${masterUrl}?id=${imported.data.entry.id}&q=810`, 'GET')).data, [
+    { code: '810000001', name: '自由記載' },
+  ]);
+  assert.equal((await request('/api/workspace', 'POST', command(1, { type: 'reset' }))).status, 200);
+  api.close();
+  assert.equal((await request(masterUrl, 'GET')).data.length, 1);
 });
