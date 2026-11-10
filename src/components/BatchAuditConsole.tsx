@@ -7,17 +7,13 @@ import {
   Wrench,
   CheckCheck,
 } from 'lucide-react';
-import { AuditFinding, AuditFixAction, PatientRecord } from '../types/receipt';
-import {
-  calculateLineItemPoints,
-  calculateReceiptPointsAndCopay,
-  runMhlwReceiptCheck,
-} from '../utils/receiptEngine';
+import type { AuditFinding } from '../types/receipt';
+import type { PatientView } from '../types/workspace';
 import { CLINIC_FACILITY_INFO, DEMO_MONTH } from '../data/mhlwMaster';
 
 interface BatchAuditConsoleProps {
-  patients: PatientRecord[];
-  onApplyAutoFix: (patientId: string, fixAction: AuditFixAction, findingTitle: string) => void;
+  patients: PatientView[];
+  onApplyAutoFix: (patientId: string, findingId: string) => void;
   onBatchAutoFixAll: () => void;
   onOpenClaimCsv: () => void;
   onNavigateToWorkstation: (patientId: string) => void;
@@ -35,8 +31,8 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
 
   const patientAudits = useMemo(() => {
     return patients.map((pt) => {
-      const calc = calculateReceiptPointsAndCopay(pt);
-      const findings = runMhlwReceiptCheck(pt);
+      const calc = pt.calculation;
+      const findings = pt.findings;
       const errors = findings.filter((f) => f.severity === 'error');
       const warnings = findings.filter((f) => f.severity === 'warning');
       const opportunities = findings.filter((f) => f.severity === 'opportunity');
@@ -381,11 +377,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
                         <button
                           type="button"
                           onClick={() =>
-                            onApplyAutoFix(
-                              activeAudit.patient.id,
-                              finding.fixAction!,
-                              finding.title
-                            )
+                            onApplyAutoFix(activeAudit.patient.id, finding.id)
                           }
                           className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
                         >
@@ -515,7 +507,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
                           {item.points} × {item.quantity * item.days}
                         </td>
                         <td className="py-1.5 px-2 text-right font-mono tabular-nums font-semibold text-slate-900">
-                          {calculateLineItemPoints(item)}点
+                          {activeAudit.patient.linePoints[item.id]}点
                         </td>
                       </tr>
                     ))}

@@ -10,7 +10,8 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react';
-import { LocalActivityEntry, PatientRecord } from '../types/receipt';
+import type { LocalActivityEntry } from '../types/receipt';
+import type { Workspace } from '../types/workspace';
 import {
   CLINIC_FACILITY_INFO,
   MHLW_DISEASE_MASTER,
@@ -18,21 +19,19 @@ import {
 } from '../data/mhlwMaster';
 
 interface LocalServerMasterViewProps {
-  patients: PatientRecord[];
   activity: LocalActivityEntry[];
   isOfflineMode: boolean;
   onToggleOfflineMode: () => void;
   onResetDemoData: () => void;
-  onCreateSnapshotLog: () => boolean;
+  onCreateSnapshot: () => Promise<Workspace | undefined>;
 }
 
 export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
-  patients,
   activity,
   isOfflineMode,
   onToggleOfflineMode,
   onResetDemoData,
-  onCreateSnapshotLog,
+  onCreateSnapshot,
 }) => {
   const [masterTab, setMasterTab] = useState<'PROCEDURE' | 'DISEASE'>('PROCEDURE');
   const [masterSearch, setMasterSearch] = useState('');
@@ -60,15 +59,16 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
     );
   }, [masterSearch]);
 
-  const handleDownloadSnapshot = () => {
-    if (!onCreateSnapshotLog()) return;
+  const handleDownloadSnapshot = async () => {
+    const snapshot = await onCreateSnapshot();
+    if (!snapshot) return;
     const payload = {
       exportedAt: new Date().toISOString(),
       facility: CLINIC_FACILITY_INFO,
-      offlineModeActive: isOfflineMode,
-      patientCount: patients.length,
-      patients,
-      activity,
+      offlineModeActive: snapshot.isOfflineMode,
+      patientCount: snapshot.patients.length,
+      patients: snapshot.patients,
+      activity: snapshot.activity,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json',
@@ -89,7 +89,7 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
     <div className="flex flex-col gap-5">
       {/* On-Premises Architecture & Offline Mode Resilience Control */}
       <section
-        aria-label="ブラウザ保存・動作モード"
+        aria-label="SQLite保存・動作モード"
         className="bg-white border border-slate-200 rounded-lg p-5"
       >
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-4">
@@ -98,7 +98,7 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
               院内サーバー・マスタ（デモ）
             </h1>
             <p className="text-xs text-slate-600 mt-1">
-              デモの患者情報と操作履歴は、このブラウザに保存されます。
+              デモの患者情報と操作履歴は、SQLiteに保存されます。
             </p>
           </div>
 
@@ -162,10 +162,10 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
               <span>保存先</span>
             </div>
             <div className="font-mono tabular-nums font-semibold text-slate-900 mt-1">
-              このブラウザ
+              RECEPTサーバー
             </div>
             <div className="text-[11px] text-slate-500 mt-1">
-              ブラウザのローカルストレージ
+              SQLiteデータベース
             </div>
           </div>
 

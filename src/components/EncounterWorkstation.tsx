@@ -12,8 +12,6 @@ import {
   MessageSquarePlus,
 } from 'lucide-react';
 import {
-  AuditFinding,
-  AuditFixAction,
   BillingLineItem,
   PatientDiagnosis,
   PatientRecord,
@@ -23,18 +21,15 @@ import {
   MHLW_DISEASE_MASTER,
   MHLW_PROCEDURE_MASTER,
 } from '../data/mhlwMaster';
-import {
-  calculateLineItemPoints,
-  calculateReceiptPointsAndCopay,
-  runMhlwReceiptCheck,
-} from '../utils/receiptEngine';
+import type { PatientView } from '../types/workspace';
 
 interface EncounterWorkstationProps {
-  patients: PatientRecord[];
+  patients: PatientView[];
   selectedPatientId: string;
   onSelectPatient: (id: string) => void;
-  onUpdatePatient: (updated: PatientRecord, logSummary: string) => boolean;
-  onApplyAutoFix: (patientId: string, fixAction: AuditFixAction, findingTitle: string) => void;
+  onUpdatePatient: (updated: PatientRecord, logSummary: string) => Promise<boolean>;
+  onApplyAutoFix: (patientId: string, findingId: string) => void;
+  onFinalize: (patientId: string) => Promise<boolean>;
   isOfflineMode: boolean;
 }
 
@@ -44,6 +39,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
   onSelectPatient,
   onUpdatePatient,
   onApplyAutoFix,
+  onFinalize,
   isOfflineMode,
 }) => {
   const [patientQuery, setPatientQuery] = useState('');
@@ -87,18 +83,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
     });
   }, [procedureQuery, selectedCategoryFilter]);
 
-  const calculation = useMemo(
-    () => calculateReceiptPointsAndCopay(selectedPatient),
-    [selectedPatient]
-  );
-
-  const auditFindings: AuditFinding[] = useMemo(
-    () => runMhlwReceiptCheck(selectedPatient),
-    [selectedPatient]
-  );
-
-  const errorCount = auditFindings.filter((f) => f.severity === 'error').length;
-  const warningCount = auditFindings.filter((f) => f.severity === 'warning').length;
+  const { calculation, findings: auditFindings } = selectedPatient;
 
   const handleAddDiagnosis = (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,10 +110,6 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
       ...selectedPatient,
       diagnoses: nextDiagnoses,
     };
-    const nextFindings = runMhlwReceiptCheck(nextPatient);
-    nextPatient.auditStatus = nextFindings.some((f) => f.severity === 'error' || f.severity === 'warning')
-      ? '要確認'
-      : '点検済・適正';
 
     onUpdatePatient(
       nextPatient,
@@ -142,20 +123,12 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
       d.id === diagId ? { ...d, outcome: nextOutcome } : d
     );
     const nextPatient: PatientRecord = { ...selectedPatient, diagnoses: nextDiagnoses };
-    const nextFindings = runMhlwReceiptCheck(nextPatient);
-    nextPatient.auditStatus = nextFindings.some((f) => f.severity === 'error' || f.severity === 'warning')
-      ? '要確認'
-      : '点検済・適正';
     onUpdatePatient(nextPatient, `傷病名転帰変更: ${diagId} -> ${nextOutcome}`);
   };
 
   const handleRemoveDiagnosis = (diagId: string, diagName: string) => {
     const nextDiagnoses = selectedPatient.diagnoses.filter((d) => d.id !== diagId);
     const nextPatient: PatientRecord = { ...selectedPatient, diagnoses: nextDiagnoses };
-    const nextFindings = runMhlwReceiptCheck(nextPatient);
-    nextPatient.auditStatus = nextFindings.some((f) => f.severity === 'error' || f.severity === 'warning')
-      ? '要確認'
-      : '点検済・適正';
     onUpdatePatient(nextPatient, `傷病名削除: ${diagName}`);
   };
 
@@ -179,42 +152,36 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
 
     const nextItems = [...selectedPatient.billingItems, newItem];
     const nextPatient: PatientRecord = { ...selectedPatient, billingItems: nextItems };
-    const nextFindings = runMhlwReceiptCheck(nextPatient);
-    nextPatient.auditStatus = nextFindings.some((f) => f.severity === 'error' || f.severity === 'warning')
-      ? '要確認'
-      : '点検済・適正';
 
     onUpdatePatient(nextPatient, `算定項目追加: ${master.name} (${master.points}点)`);
   };
 
-  const handleUpdateItemQuantityOrDays = (
-    itemId: string,
+  const handleUpdateItemQuantityOrDays = async (
+    item: BillingLineItem,
     field: 'quantity' | 'days',
-    value: number
+    input: HTMLInputElement,
   ) => {
-    const safeVal = Math.max(1, Math.min(90, Math.round(value)));
-    const nextItems = selectedPatient.billingItems.map((item) =>
-      item.id === itemId ? { ...item, [field]: safeVal } : item
+    const value = input.valueAsNumber;
+    const nextValue = Number.isFinite(value) ? Math.max(1, Math.min(90, Math.round(value))) : item[field];
+    input.value = String(nextValue);
+    if (nextValue === item[field]) return;
+
+    const billingItems = selectedPatient.billingItems.map((entry) =>
+      entry.id === item.id ? { ...entry, [field]: nextValue } : entry
     );
-    const nextPatient: PatientRecord = { ...selectedPatient, billingItems: nextItems };
-    const nextFindings = runMhlwReceiptCheck(nextPatient);
-    nextPatient.auditStatus = nextFindings.some((f) => f.severity === 'error' || f.severity === 'warning')
-      ? '要確認'
-      : '点検済・適正';
-    onUpdatePatient(nextPatient, `算定数量・日数変更: ${itemId} (${field}=${safeVal})`);
+    const saved = await onUpdatePatient(
+      { ...selectedPatient, billingItems }, `算定数量・日数変更: ${item.id} (${field}=${nextValue})`,
+    );
+    if (!saved) input.value = String(item[field]);
   };
 
   const handleRemoveBillingItem = (itemId: string, itemName: string) => {
     const nextItems = selectedPatient.billingItems.filter((item) => item.id !== itemId);
     const nextPatient: PatientRecord = { ...selectedPatient, billingItems: nextItems };
-    const nextFindings = runMhlwReceiptCheck(nextPatient);
-    nextPatient.auditStatus = nextFindings.some((f) => f.severity === 'error' || f.severity === 'warning')
-      ? '要確認'
-      : '点検済・適正';
     onUpdatePatient(nextPatient, `算定項目削除: ${itemName}`);
   };
 
-  const handleSaveComment = (itemId: string) => {
+  const handleSaveComment = async (itemId: string) => {
     if (!commentInputText.trim()) {
       setEditingCommentItemId(null);
       return;
@@ -229,28 +196,15 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
         : item
     );
     const nextPatient: PatientRecord = { ...selectedPatient, billingItems: nextItems };
-    const nextFindings = runMhlwReceiptCheck(nextPatient);
-    nextPatient.auditStatus = nextFindings.some((f) => f.severity === 'error' || f.severity === 'warning')
-      ? '要確認'
-      : '点検済・適正';
-    if (!onUpdatePatient(nextPatient, `摘要コメント記載: ${commentInputText.trim()}`)) return;
+    if (!await onUpdatePatient(nextPatient, `摘要コメント記載: ${commentInputText.trim()}`)) return;
     setEditingCommentItemId(null);
     setCommentInputText('');
   };
 
-  const handleFinalizeAccounting = () => {
-    const nextStatus =
-      errorCount === 0 && warningCount === 0 ? '点検済・適正' : '要確認';
-    const nextPatient: PatientRecord = {
-      ...selectedPatient,
-      auditStatus: nextStatus,
-    };
-    if (!onUpdatePatient(
-      nextPatient,
-      `デモ会計確定: 総点数 ${calculation.totalPoints}点 / 窓口負担 ${calculation.copayRoundedYen.toLocaleString()}円`
-    )) return;
+  const handleFinalizeAccounting = async () => {
+    if (!await onFinalize(selectedPatient.id)) return;
     setFinalizeBanner(
-      `${selectedPatient.name} 様の診療会計（総点数 ${calculation.totalPoints.toLocaleString()}点・窓口負担金 ${calculation.copayRoundedYen.toLocaleString()}円）をブラウザに保存しました。`
+      `${selectedPatient.name} 様の診療会計（総点数 ${calculation.totalPoints.toLocaleString()}点・窓口負担金 ${calculation.copayRoundedYen.toLocaleString()}円）をSQLiteに保存しました。`
     );
     setTimeout(() => setFinalizeBanner(null), 5000);
   };
@@ -270,7 +224,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
             </p>
           </div>
           <span className="text-xs text-slate-500 font-mono tabular-nums">
-            要確認 {patients.filter((p) => runMhlwReceiptCheck(p).some((f) => f.severity === 'error' || f.severity === 'warning')).length}件
+            要確認 {patients.filter((p) => p.findings.some((f) => f.severity === 'error' || f.severity === 'warning')).length}件
           </span>
         </div>
 
@@ -288,10 +242,10 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
 
         <div className="divide-y divide-slate-100 max-h-[640px] overflow-y-auto">
           {filteredPatients.map((pt) => {
-            const ptFindings = runMhlwReceiptCheck(pt);
+            const ptFindings = pt.findings;
             const ptErrors = ptFindings.filter((f) => f.severity === 'error').length;
             const ptWarnings = ptFindings.filter((f) => f.severity === 'warning').length;
-            const ptCalc = calculateReceiptPointsAndCopay(pt);
+            const ptCalc = pt.calculation;
             const isSelected = pt.id === selectedPatient.id;
 
             return (
@@ -574,7 +528,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {selectedPatient.billingItems.map((item) => {
-                  const lineTotal = calculateLineItemPoints(item);
+                  const lineTotal = selectedPatient.linePoints[item.id];
                   const hasFinding = auditFindings.some((f) => f.relatedItemId === item.id);
 
                   return (
@@ -635,16 +589,12 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                           <input
                             type="number"
                             min={1}
-                            max={30}
+                            max={90}
                             aria-label={`${item.name}の数量`}
-                            value={item.quantity}
-                            onChange={(e) =>
-                              handleUpdateItemQuantityOrDays(
-                                item.id,
-                                'quantity',
-                                Number(e.target.value)
-                              )
-                            }
+                            key={item.quantity}
+                            defaultValue={item.quantity}
+                            onBlur={(e) => handleUpdateItemQuantityOrDays(item, 'quantity', e.currentTarget)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                             className="w-11 text-center bg-white border border-slate-200 rounded py-0.5 text-xs"
                           />
                           <span className="text-slate-400">×</span>
@@ -653,14 +603,10 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             min={1}
                             max={90}
                             aria-label={`${item.name}の日数または回数`}
-                            value={item.days}
-                            onChange={(e) =>
-                              handleUpdateItemQuantityOrDays(
-                                item.id,
-                                'days',
-                                Number(e.target.value)
-                              )
-                            }
+                            key={item.days}
+                            defaultValue={item.days}
+                            onBlur={(e) => handleUpdateItemQuantityOrDays(item, 'days', e.currentTarget)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                             className="w-12 text-center bg-white border border-slate-200 rounded py-0.5 text-xs"
                           />
                           <span className="text-[11px] text-slate-500">
@@ -916,7 +862,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                         <button
                           type="button"
                           onClick={() =>
-                            onApplyAutoFix(selectedPatient.id, finding.fixAction!, finding.title)
+                            onApplyAutoFix(selectedPatient.id, finding.id)
                           }
                           className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium rounded transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap overflow-hidden"
                         >

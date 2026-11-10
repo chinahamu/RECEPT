@@ -6,14 +6,11 @@ import {
   PatientRecord,
 } from '../types/receipt';
 import { DEMO_DATE, MHLW_DISEASE_MASTER } from '../data/mhlwMaster';
-import {
-  calculateReceiptPointsAndCopay,
-  runMhlwReceiptCheck,
-} from '../utils/receiptEngine';
+import type { PatientView } from '../types/workspace';
 
 interface PatientRegistryViewProps {
-  patients: PatientRecord[];
-  onRegisterPatient: (newPatient: PatientRecord) => boolean;
+  patients: PatientView[];
+  onRegisterPatient: (newPatient: PatientRecord) => Promise<boolean>;
   onSelectAndOpenWorkstation: (patientId: string) => void;
 }
 
@@ -52,7 +49,7 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
     });
   }, [patients, searchQuery, insuranceFilter]);
 
-  const handleSubmitNewPatient = (e: React.FormEvent) => {
+  const handleSubmitNewPatient = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !kana.trim()) {
       setFormError('患者氏名およびフリガナは必須入力項目です。');
@@ -129,7 +126,7 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
       ],
     };
 
-    if (!onRegisterPatient(newPatient)) return;
+    if (!await onRegisterPatient(newPatient)) return;
     setName('');
     setKana('');
     setFormError(null);
@@ -144,7 +141,7 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
             患者台帳・保険情報（デモ）
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            架空患者の保険情報・公費情報・来院履歴をブラウザに保存します
+            架空患者の保険情報・公費情報・来院履歴をSQLiteに保存します
           </p>
         </div>
 
@@ -389,8 +386,8 @@ export const PatientRegistryView: React.FC<PatientRegistryViewProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredPatients.map((pt) => {
-                const calc = calculateReceiptPointsAndCopay(pt);
-                const findings = runMhlwReceiptCheck(pt);
+                const calc = pt.calculation;
+                const findings = pt.findings;
                 const mainDiag = pt.diagnoses.find((d) => d.isMain) || pt.diagnoses[0];
 
                 return (
