@@ -16,7 +16,10 @@ def main():
         parser.error("DBファイルの拡張子には .sqlite3 を指定してください。")
 
     schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = path.parent.stat()
+    if os.name == "posix" and (directory.st_uid != os.getuid() or directory.st_mode & 0o022):
+        parser.error("DBは、起動ユーザーが所有し他のユーザーが書き込めないディレクトリに置いてください。")
     try:
         os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
     except FileExistsError:

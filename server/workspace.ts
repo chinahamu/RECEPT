@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { INITIAL_PATIENTS } from '../src/data/demoWorkspace';
 import type { LocalActivityEntry, PatientRecord } from '../src/types/receipt';
@@ -13,6 +12,7 @@ import type { ValidRequest } from './validation';
 import { WorkspaceError } from './errors';
 import { officialMasters } from './officialMasters';
 import { clinicalMasters } from './clinicalMasters';
+import { protectedDatabasePath } from './databaseFiles';
 import { claimRecords } from './claimRecords';
 import type { ClaimRecord } from '../src/types/claimRecord';
 import { appendAccessAudit, type AuditAccess } from './accessAudit';
@@ -76,11 +76,12 @@ function record(db: DatabaseSync, actionType: LocalActivityEntry['actionType'], 
   db.prepare('INSERT INTO activity (entry) VALUES (?)').run(JSON.stringify(entry));
 }
 
-function workspaceFromDb(db: DatabaseSync): Workspace {
+function workspaceFromDb(db: DatabaseSync, dataExportsEnabled: boolean): Workspace {
   const settings = db.prepare('SELECT revision, offline FROM workspace WHERE id = 1').get()!;
   const activity = db.prepare('SELECT entry FROM activity ORDER BY seq DESC LIMIT 50').all();
   return {
     revision: Number(settings.revision),
+    dataExportsEnabled,
     isOfflineMode: Boolean(settings.offline),
     masterKinds: db.prepare('SELECT DISTINCT kind FROM master_imports').all().map((row) => row.kind as MasterKind),
     activity: activity.map((row) => JSON.parse(String(row.entry))),
@@ -203,14 +204,14 @@ function applyAction(db: DatabaseSync, masters: ReturnType<typeof clinicalMaster
   return [patient.id];
 }
 
-export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlite3') {
-  const filename = resolve(path);
-  if (!filename.endsWith('.sqlite3') || !existsSync(filename)) {
-    throw new WorkspaceError(503, 'SQLite DBを開けません。npm run db:init と RECEPT_DB の設定を確認してください。');
+export function openWorkspace(path?: string, dataExportsEnabled = process.env.RECEPT_ENABLE_DEMO_EXPORTS === '1') {
+  const filename = protectedDatabasePath(path);
+  function requireDataExports() {
+    if (!dataExportsEnabled) throw new WorkspaceError(403, 'デモデータ出力は無効です。');
   }
   const db = new DatabaseSync(filename);
   try {
-    db.exec('PRAGMA busy_timeout = 3000; PRAGMA foreign_keys = ON');
+    db.exec('PRAGMA busy_timeout = 3000; PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY; PRAGMA secure_delete = ON');
     transaction(db, () => {
       const version = db.prepare('PRAGMA user_version').get()?.user_version;
       if (db.prepare('PRAGMA application_id').get()?.application_id !== 0x52435054 ||
@@ -244,13 +245,14 @@ export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlit
     clinical,
     masters,
     read: (access?: AuditAccess) => transaction(db, () => {
-      const workspace = workspaceFromDb(db);
+      const workspace = workspaceFromDb(db, dataExportsEnabled);
       if (access) appendAccessAudit(db, access, {
         status: 200, patientIds: workspace.patients.map(({ id }) => id),
       });
       return workspace;
     }, Boolean(access)),
     preview: (access?: AuditAccess) => transaction(db, () => {
+      requireDataExports();
       const records = claims.latestForExport();
       const result = claimPreview(records, revisionNow());
       if (access) appendAccessAudit(db, access, {
@@ -271,12 +273,14 @@ export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlit
       });
       return page;
     }, true),
-    readClaimRecord: (id: string, access: AuditAccess) => transaction(db, () => {
+    readClaimRecord: (id: string, access: AuditAccess, exporting = false) => transaction(db, () => {
+      if (exporting) requireDataExports();
       const result = claims.get(id);
       appendAccessAudit(db, access, { status: 200, patientIds: [result.patientId], claimRecordIds: [id] });
       return result;
     }, true),
     apply: ({ revision, action }: ValidRequest, access?: AuditAccess): WorkspaceResult => transaction(db, () => {
+      if (action.type === 'snapshot' || action.type === 'exportCsv') requireDataExports();
       if (revision !== revisionNow()) {
         throw new WorkspaceError(409, '別の画面でデータが更新されました。最新データを読み込んでから再操作してください。');
       }
@@ -298,7 +302,7 @@ export function openWorkspace(path = process.env.RECEPT_DB || 'data/recept.sqlit
         }
       }
       db.exec('UPDATE workspace SET revision = revision + 1 WHERE id = 1');
-      const workspace = workspaceFromDb(db);
+      const workspace = workspaceFromDb(db, dataExportsEnabled);
       const exported = action.type === 'exportCsv' ? claims.latestForExport() : [];
       const claim = action.type === 'exportCsv' ? claimPreview(exported, workspace.revision) : undefined;
       if (access) appendAccessAudit(db, access, {

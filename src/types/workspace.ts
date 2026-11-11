@@ -13,6 +13,7 @@ export interface PatientView extends PatientRecord {
 
 export interface Workspace {
   revision: number;
+  dataExportsEnabled: boolean;
   masterKinds: MasterKind[];
   patients: PatientView[];
   activity: LocalActivityEntry[];

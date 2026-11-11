@@ -1,14 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AuditAccess, AuditActor } from './accessAudit';
+import { isSameOriginApiRequest, protectedResponseHeaders } from './browserProtection';
 import { requestSchema } from './validation';
 import { openWorkspace } from './workspace';
 import { WorkspaceError } from './errors';
 import { masterFileParams } from './officialMasters';
 import { MASTER_MAX_BYTES } from '../src/data/officialMasters';
 
-const loopbackHost = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
-const loopbackAddresses = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const maxBodyBytes = 4 * 1024 * 1024;
 
 async function readBody(req: IncomingMessage, limit: number) {
@@ -45,8 +44,7 @@ async function readAction(req: IncomingMessage) {
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
+    ...protectedResponseHeaders,
   });
   res.end(JSON.stringify(body));
 }
@@ -77,10 +75,7 @@ export function createWorkspaceApi(
       };
 
       void (async () => {
-        const host = req.headers.host ?? '';
-        const origin = req.headers.origin;
-        if (!loopbackHost.test(host) || !loopbackAddresses.has(req.socket.remoteAddress ?? '') ||
-            (origin && origin !== `http://${host}` && origin !== `https://${host}`)) {
+        if (!isSameOriginApiRequest(req)) {
           throw new WorkspaceError(403, 'このデモAPIは同じPCから利用してください。');
         }
 
@@ -121,9 +116,11 @@ export function createWorkspaceApi(
           const id = params.get('id');
           const query = (params.get('q') ?? '').trim();
           const before = params.get('before');
+          const exportMode = params.get('export');
           const validId = /^[A-Za-z0-9_-]{1,100}$/;
           if ((patientId !== null && !validId.test(patientId)) || (id !== null && !validId.test(id)) ||
               (patientId !== null && id !== null) || query.length > 100 ||
+              (exportMode !== null && (exportMode !== '1' || id === null)) ||
               (before !== null && (!/^\d+$/.test(before) || !Number.isSafeInteger(Number(before)) || Number(before) < 1)) ||
               ((patientId !== null || id !== null) && (query || before !== null))) {
             throw new WorkspaceError(400, '請求記録の照会条件が正しくありません。');
@@ -133,8 +130,8 @@ export function createWorkspaceApi(
             access.operation = 'review-claim-draft';
             sendJson(res, 200, store.previewConfirmation(patientId, access));
           } else if (id) {
-            access.operation = 'read-claim-record';
-            sendJson(res, 200, store.readClaimRecord(id, access));
+            access.operation = exportMode ? 'export-claim-record' : 'read-claim-record';
+            sendJson(res, 200, store.readClaimRecord(id, access, exportMode === '1'));
           } else {
             access.operation = 'list-claim-records';
             sendJson(res, 200, store.listClaimRecords(query, before === null ? null : Number(before), access));

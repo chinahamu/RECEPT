@@ -22,6 +22,10 @@ import { HardDrive, Wifi, WifiOff } from 'lucide-react';
 type ActiveTab = 'workstation' | 'audit' | 'patients' | 'claims' | 'server';
 
 const API = '/api/workspace';
+
+function confirmDemoExport(destination: string) {
+  return window.confirm(`患者情報を含むデモデータを${destination}します。管理された端末・保存先であることを確認してください。`);
+}
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('workstation');
   const [workspace, setWorkspace] = useState<Workspace>();
@@ -105,6 +109,12 @@ export default function App() {
     if (preview) setConfirmation(preview);
   }
 
+  function exportClaimRecord(id: string) {
+    if (!confirmDemoExport('JSONファイルに保存')) return Promise.resolve(undefined);
+    const query = new URLSearchParams({ id, export: '1' });
+    return run(() => requestJson<ClaimRecord>(`/api/claim-records?${query}`));
+  }
+
   async function openClaimRecord(id: string) {
     const query = new URLSearchParams({ id });
     const record = await run(() => requestJson<ClaimRecord>(`/api/claim-records?${query}`));
@@ -135,7 +145,7 @@ export default function App() {
     );
   }
 
-  const { patients, activity, isOfflineMode } = workspace;
+  const { patients, activity, isOfflineMode, dataExportsEnabled } = workspace;
   const missingMasters = (Object.keys(OFFICIAL_MASTERS) as MasterKind[])
     .filter((kind) => !workspace.masterKinds.includes(kind));
   const totalErrorCount = patients.reduce((sum, patient) => sum + patient.findings.filter((f) => f.severity === 'error').length, 0);
@@ -233,10 +243,10 @@ export default function App() {
           <button
             type="button"
             onClick={openClaim}
-            disabled={busy}
-            className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+            disabled={busy || !dataExportsEnabled}
+            className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
           >
-            デモ請求CSV出力
+            {dataExportsEnabled ? 'デモ請求CSV出力' : 'デモデータ出力は無効'}
           </button>
         </div>
       </header>
@@ -320,7 +330,7 @@ export default function App() {
             patients={patients}
             onApplyAutoFix={(patientId, findingId) => mutate({ type: 'fix', patientId, findingId })}
             onBatchAutoFixAll={() => mutate({ type: 'batchFix' })}
-            onOpenClaimCsv={openClaim}
+            onOpenClaimCsv={dataExportsEnabled ? openClaim : undefined}
             onNavigateToWorkstation={(patientId) => {
               setSelectedPatientId(patientId);
               setActiveTab('workstation');
@@ -349,7 +359,10 @@ export default function App() {
             }))}
             onToggleOfflineMode={() => mutate({ type: 'toggleOffline' })}
             onResetDemoData={handleResetDemoData}
-            onCreateSnapshot={async () => (await mutate({ type: 'snapshot' }))?.workspace}
+            onCreateSnapshot={dataExportsEnabled ? async () => {
+              if (!confirmDemoExport('JSONファイルに保存')) return;
+              return (await mutate({ type: 'snapshot' }))?.workspace;
+            } : undefined}
           />
         )}
       </main>
@@ -368,12 +381,14 @@ export default function App() {
         onConfirm={(reason) => confirmClaim(confirmation, reason)} busy={busy} error={storageError}
         onClose={() => setConfirmation(undefined)} />}
       {claimRecord && <ClaimRecordDialog record={claimRecord} busy={busy} error={storageError}
+        onExport={dataExportsEnabled ? () => exportClaimRecord(claimRecord.id) : undefined}
         onClose={() => setClaimRecord(undefined)} />}
       {claim && (
         <ClaimCsvModal
           claim={claim}
           onClose={() => setClaim(undefined)}
-          onExport={async () => {
+          onExport={async (destination) => {
+            if (!confirmDemoExport(destination === 'clipboard' ? 'クリップボードにコピー' : 'CSVファイルに保存')) return;
             const output = (await mutate({ type: 'exportCsv' }, claim.revision))?.claim;
             if (output) setClaim(output);
             return output;

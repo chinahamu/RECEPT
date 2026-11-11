@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,7 +27,7 @@ const command = (revision: number, action: WorkspaceAction) => requestSchema.par
 
 test('SQLite stores patients, details and activity across a server restart', (t) => {
   const filename = setup(t);
-  const store = openWorkspace(filename);
+  const store = openWorkspace(filename, true);
   try {
     const initial = store.read();
     assert.equal(initial.patients.length, INITIAL_PATIENTS.length);
@@ -136,23 +136,24 @@ test('stale commands and failed updates leave no partial writes', (t) => {
 });
 
 function requestApi(api: ReturnType<typeof createWorkspaceApi>) {
-  return function request(url: string, method: string, value?: unknown, origin?: string) {
+  return function request(url: string, method: string, value?: unknown, origin?: string, fetchSite?: string) {
     const raw = Buffer.isBuffer(value);
     const body = raw ? value : Buffer.from(JSON.stringify(value ?? null));
     const req = Object.assign(Readable.from(value === undefined ? [] : [body]), {
       url, method,
       headers: {
         host: 'localhost:5173', 'content-type': raw ? 'application/octet-stream' : 'application/json', origin,
-        'x-user-id': 'untrusted-client-identity',
+        'x-user-id': 'untrusted-client-identity', 'sec-fetch-site': fetchSite,
       },
       socket: { remoteAddress: '127.0.0.1' },
     });
-    return new Promise<{ status: number; data: any }>((resolve, reject) => {
+    return new Promise<{ status: number; data: any; headers: Record<string, string> }>((resolve, reject) => {
       let status = 0;
+      let headers: Record<string, string> = {};
       const res = {
         setHeader() {},
-        writeHead(code: number) { status = code; },
-        end(body: string) { resolve({ status, data: JSON.parse(body) }); },
+        writeHead(code: number, responseHeaders: Record<string, string>) { status = code; headers = responseHeaders; },
+        end(body: string) { resolve({ status, data: JSON.parse(body), headers }); },
       };
       api.middleware(req as unknown as IncomingMessage, res as unknown as ServerResponse, () => reject(new Error('Unexpected next()')));
     });
@@ -161,7 +162,7 @@ function requestApi(api: ReturnType<typeof createWorkspaceApi>) {
 
 test('workspace HTTP middleware serves JSON and rejects cross-origin or malformed writes', async (t) => {
   const filename = setup(t);
-  const api = createWorkspaceApi(() => openWorkspace(filename));
+  const api = createWorkspaceApi(() => openWorkspace(filename, true));
   t.after(api.close);
   const request = requestApi(api);
   assert.equal((await request('/api/workspace', 'GET')).status, 200);
@@ -204,7 +205,7 @@ test('workspace HTTP middleware serves JSON and rejects cross-origin or malforme
 
 test('access audit records API disclosure, changes and failures across reset and restart', async (t) => {
   const filename = setup(t);
-  const api = createWorkspaceApi(() => openWorkspace(filename));
+  const api = createWorkspaceApi(() => openWorkspace(filename, true));
   t.after(api.close);
   const request = requestApi(api);
   await request('/api/workspace', 'GET');
@@ -308,7 +309,7 @@ test('claim confirmation freezes the reviewed version, requires a correction rea
   const editor = { kind: 'authenticated', userId: 'staff-input', loginAt: '2026-11-11T00:00:00.000Z' } as const;
   const confirmer = { ...editor, userId: 'staff-confirm' };
   let actor: typeof editor | typeof confirmer = editor;
-  const api = createWorkspaceApi(() => openWorkspace(filename), () => actor);
+  const api = createWorkspaceApi(() => openWorkspace(filename, true), () => actor);
   t.after(api.close);
   const request = requestApi(api);
   const patient = INITIAL_PATIENTS[0];
@@ -378,7 +379,8 @@ test('claim confirmation freezes the reviewed version, requires a correction rea
   execFileSync('python3', ['-c', `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as target:
     source.backup(target)`, filename, backupFile]);
-  const restoredApi = createWorkspaceApi(() => openWorkspace(backupFile));
+  chmodSync(backupFile, 0o600);
+  const restoredApi = createWorkspaceApi(() => openWorkspace(backupFile, true));
   t.after(restoredApi.close);
   const restoredRequest = requestApi(restoredApi);
   assert.deepEqual((await restoredRequest(`/api/claim-records?id=${first.id}`, 'GET')).data, first);
@@ -405,4 +407,69 @@ test('claim confirmation rolls back with the access audit if logging fails', asy
   }))).status, 500);
   assert.equal(db.prepare('SELECT count(*) AS count FROM claim_records').get()?.count, 0);
   assert.equal(db.prepare('SELECT revision FROM workspace').get()?.revision, preview.revision);
+});
+
+
+test('demo exports are blocked at the API unless enabled, with access denials and export requests audited', async (t) => {
+  const filename = setup(t);
+  const api = createWorkspaceApi(() => openWorkspace(filename, false));
+  t.after(api.close);
+  const request = requestApi(api);
+  const workspace = await request('/api/workspace', 'GET');
+  assert.equal(workspace.data.dataExportsEnabled, false);
+  assert.equal(workspace.headers['Cache-Control'], 'no-store');
+  assert.equal(workspace.headers['X-Frame-Options'], 'DENY');
+  assert.equal(workspace.headers['Cross-Origin-Resource-Policy'], 'same-origin');
+  assert.equal((await request('/api/workspace', 'GET', undefined, undefined, 'same-site')).status, 403);
+  assert.equal((await request('/api/workspace', 'GET', undefined, 'http://localhost:5173', 'same-origin')).status, 200);
+  const patientId = workspace.data.patients[0].id;
+  const preview = (await request(`/api/claim-records?patientId=${patientId}`, 'GET')).data;
+  const saved = await request('/api/workspace', 'POST', command(preview.revision, {
+    type: 'finalize', patientId, reviewHash: preview.reviewHash,
+  }));
+  assert.equal(saved.status, 200);
+  const path = `/api/claim-records?id=${saved.data.claimRecord.id}`;
+  assert.equal((await request(path, 'GET')).status, 200);
+  assert.equal((await request(path + '&export=1', 'GET')).status, 403);
+  assert.equal((await request('/api/claim-preview', 'GET')).status, 403);
+  for (const type of ['exportCsv', 'snapshot'] as const) {
+    const denied = await request('/api/workspace', 'POST', command(saved.data.workspace.revision, { type }));
+    assert.equal(denied.status, 403);
+    assert.equal(denied.data.workspace, undefined);
+  }
+  assert.equal((await request('/api/workspace', 'GET')).data.revision, saved.data.workspace.revision);
+
+  api.close();
+  const enabledApi = createWorkspaceApi(() => openWorkspace(filename, true));
+  t.after(enabledApi.close);
+  const enabledRequest = requestApi(enabledApi);
+  assert.equal((await enabledRequest('/api/workspace', 'GET')).data.dataExportsEnabled, true);
+  const exported = await enabledRequest(path + '&export=1', 'GET');
+  assert.deepEqual(exported.data, saved.data.claimRecord);
+  const db = new DatabaseSync(filename, { readOnly: true });
+  t.after(() => db.close());
+  assert.deepEqual(readAccessAudit(db, 0, 100).map(({ event }) => event)
+    .filter(({ operation }) => operation === 'export-claim-record')
+    .map(({ status, claimRecordIds }) => [status, claimRecordIds]),
+  [[403, undefined], [200, [saved.data.claimRecord.id]]]);
+});
+
+test('the database and sidecars must be private regular files on POSIX', { skip: process.platform === 'win32' }, (t) => {
+  const filename = setup(t);
+  const privateDir = join(filename, '..', 'private');
+  const fresh = join(privateDir, 'workspace.sqlite3');
+  execFileSync('python3', ['database/init.py', fresh]);
+  assert.equal(statSync(privateDir).mode & 0o077, 0);
+  assert.equal(statSync(fresh).mode & 0o077, 0);
+  chmodSync(fresh, 0o644);
+  assert.throws(() => openWorkspace(fresh), /起動ユーザーだけ/);
+  chmodSync(fresh, 0o600);
+  chmodSync(privateDir, 0o770);
+  assert.throws(() => openWorkspace(fresh), /他のユーザーが書き込めない/);
+  chmodSync(privateDir, 0o700);
+  const alias = join(privateDir, 'alias.sqlite3');
+  symlinkSync(fresh, alias);
+  assert.throws(() => openWorkspace(alias), /リンクではない/);
+  symlinkSync(filename, fresh + '-wal');
+  assert.throws(() => openWorkspace(fresh), /リンクではない/);
 });
