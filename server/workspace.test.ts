@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import type { WorkspaceAction } from '../src/types/workspace';
 import { createWorkspaceApi } from './api';
 import { requestSchema } from './validation';
 import { openWorkspace, WorkspaceError } from './workspace';
+import { readAccessAudit, verifyAccessAudit } from './accessAudit';
 import { masterFileParams } from './officialMasters';
 
 function setup(t: { after(callback: () => void): void }) {
@@ -127,27 +128,35 @@ test('stale commands and failed updates leave no partial writes', (t) => {
   assert.deepEqual(reset.activity, []);
 });
 
-test('workspace HTTP middleware serves JSON and rejects cross-origin or malformed writes', async (t) => {
-  const filename = setup(t);
-  const api = createWorkspaceApi(() => openWorkspace(filename));
-  t.after(api.close);
-  function request(url: string, method: string, value?: unknown, origin?: string) {
+function requestApi(api: ReturnType<typeof createWorkspaceApi>) {
+  return function request(url: string, method: string, value?: unknown, origin?: string) {
     const raw = Buffer.isBuffer(value);
     const body = raw ? value : Buffer.from(JSON.stringify(value ?? null));
     const req = Object.assign(Readable.from(value === undefined ? [] : [body]), {
       url, method,
-      headers: { host: 'localhost:5173', 'content-type': raw ? 'application/octet-stream' : 'application/json', origin },
+      headers: {
+        host: 'localhost:5173', 'content-type': raw ? 'application/octet-stream' : 'application/json', origin,
+        'x-user-id': 'untrusted-client-identity',
+      },
       socket: { remoteAddress: '127.0.0.1' },
     });
     return new Promise<{ status: number; data: any }>((resolve, reject) => {
       let status = 0;
       const res = {
+        setHeader() {},
         writeHead(code: number) { status = code; },
         end(body: string) { resolve({ status, data: JSON.parse(body) }); },
       };
       api.middleware(req as unknown as IncomingMessage, res as unknown as ServerResponse, () => reject(new Error('Unexpected next()')));
     });
-  }
+  };
+}
+
+test('workspace HTTP middleware serves JSON and rejects cross-origin or malformed writes', async (t) => {
+  const filename = setup(t);
+  const api = createWorkspaceApi(() => openWorkspace(filename));
+  t.after(api.close);
+  const request = requestApi(api);
   assert.equal((await request('/api/workspace', 'GET')).status, 200);
   assert.equal((await request('/api/workspace', 'POST', {}, 'https://example.org')).status, 403);
   assert.equal((await request('/api/workspace', 'POST', {})).status, 400);
@@ -176,4 +185,112 @@ test('workspace HTTP middleware serves JSON and rejects cross-origin or malforme
   assert.equal((await request('/api/workspace', 'POST', command(1, { type: 'reset' }))).status, 200);
   api.close();
   assert.equal((await request(masterUrl, 'GET')).data.length, 1);
+  const db = new DatabaseSync(filename, { readOnly: true });
+  t.after(() => db.close());
+  const imports = readAccessAudit(db, 0, 100).map(({ event }) => event)
+    .filter(({ operation }) => operation === 'import-master');
+  assert.deepEqual(imports.map(({ status, masterImportId, duplicate }) => [status, masterImportId, duplicate]), [
+    [400, undefined, undefined], [200, imported.data.entry.id, false], [200, imported.data.entry.id, true],
+  ]);
+});
+
+
+test('access audit records API disclosure, changes and failures across reset and restart', async (t) => {
+  const filename = setup(t);
+  const api = createWorkspaceApi(() => openWorkspace(filename));
+  t.after(api.close);
+  const request = requestApi(api);
+  await request('/api/workspace', 'GET');
+  const registration = await request('/api/workspace', 'POST', command(0, {
+    type: 'register', patient: { ...INITIAL_PATIENTS[0], name: 'ログに保存しない氏名', diagnoses: [], billingItems: [] },
+  }));
+  assert.equal(registration.status, 200);
+  const patientId = registration.data.workspace.patients[0].id;
+  assert.equal((await request('/api/workspace', 'POST', command(1, { type: 'snapshot' }))).status, 200);
+  assert.equal((await request('/api/workspace', 'POST', command(2, { type: 'exportCsv' }))).status, 200);
+  assert.equal((await request('/api/claim-preview', 'GET')).status, 200);
+  assert.equal((await request('/api/workspace', 'POST', command(0, { type: 'reset' }))).status, 409);
+  assert.equal((await request('/api/workspace', 'POST', command(3, { type: 'reset' }))).status, 200);
+  assert.equal((await request('/api/workspace', 'POST', {}, 'https://example.org')).status, 403);
+  assert.equal((await request('/api/claim-preview', 'POST')).status, 405);
+  api.close();
+  await request('/api/workspace', 'GET');
+
+  const db = new DatabaseSync(filename);
+  t.after(() => db.close());
+  const events = readAccessAudit(db, 0, 100).map(({ event }) => event);
+  assert.deepEqual(events.map(({ operation, status }) => [operation, status]), [
+    ['read', 200], ['register', 200], ['snapshot', 200], ['exportCsv', 200], ['read', 200],
+    ['reset', 409], ['reset', 200], ['write', 403], ['write', 405], ['read', 200],
+  ]);
+  assert.equal(new Set(events.map(({ requestId }) => requestId)).size, events.length);
+  assert.ok(events.every(({ requestedAt, recordedAt }) => !Number.isNaN(Date.parse(requestedAt)) &&
+    !Number.isNaN(Date.parse(recordedAt))));
+  assert.ok(events.every(({ actor }) => actor.kind === 'anonymous'));
+  assert.deepEqual(events[1].affectedPatientIds, [patientId]);
+  assert.ok(events[2].patientIds?.includes(patientId));
+  assert.ok(events[3].patientIds?.includes(patientId));
+  assert.ok(events[4].patientIds?.includes(patientId));
+  assert.equal(events[5].patientIds, undefined);
+  assert.ok(events[6].affectedPatientIds?.includes(patientId));
+  assert.equal(events[6].patientIds?.includes(patientId), false);
+  assert.doesNotMatch(JSON.stringify(events), /ログに保存しない氏名|untrusted-client-identity/);
+
+  const checkpoint = verifyAccessAudit(db);
+  assert.equal(checkpoint.seq, events.length);
+  const auditCli = (...args: string[]) => execFileSync(process.execPath,
+    ['--import', 'tsx', 'server/reviewAccessAudit.ts', ...args], {
+      encoding: 'utf8', env: { ...process.env, RECEPT_DB: filename },
+    }).trim();
+  assert.equal(auditCli('verify'), `${checkpoint.seq}:${checkpoint.hash}`);
+  assert.equal(JSON.parse(auditCli('review', '1', '1')).event.operation, 'register');
+  assert.throws(() => db.exec("UPDATE access_audit SET payload = '{}' WHERE seq = 1"), /append-only/);
+  assert.throws(() => db.exec('DELETE FROM access_audit WHERE seq = 1'), /append-only/);
+  assert.throws(() => db.exec('INSERT OR REPLACE INTO access_audit SELECT * FROM access_audit WHERE seq = 1'), /appended/);
+  db.exec('DROP TRIGGER access_audit_no_delete; DELETE FROM access_audit WHERE seq = (SELECT max(seq) FROM access_audit)');
+  assert.throws(() => verifyAccessAudit(db, checkpoint), /チェックポイント/);
+});
+
+test('audit stores only a trusted actor and blocks reads and writes when their audit append fails', async (t) => {
+  const filename = setup(t);
+  const actor = { kind: 'authenticated', userId: 'staff-001', loginAt: '2026-11-11T00:00:00.000Z' } as const;
+  const api = createWorkspaceApi(() => openWorkspace(filename), async () => ({ ...actor, token: 'do-not-log' }));
+  t.after(api.close);
+  const request = requestApi(api);
+  assert.equal((await request('/api/workspace', 'GET')).status, 200);
+  const db = new DatabaseSync(filename);
+  t.after(() => db.close());
+  assert.deepEqual(readAccessAudit(db, 0, 1)[0].event.actor, actor);
+
+  db.exec(`CREATE TRIGGER fail_success_audit BEFORE INSERT ON access_audit
+    WHEN json_extract(NEW.payload, '$.status') = 200 BEGIN SELECT raise(ABORT, 'audit write failed'); END`);
+  const read = await request('/api/workspace', 'GET');
+  assert.equal(read.status, 500);
+  assert.equal(read.data.patients, undefined);
+  assert.equal((await request('/api/workspace', 'POST', command(0, { type: 'toggleOffline' }))).status, 500);
+  assert.equal(db.prepare('SELECT revision FROM workspace').get()?.revision, 0);
+  assert.deepEqual(readAccessAudit(db, 1, 100).map(({ event }) => event.status), [500, 500]);
+});
+
+
+test('an existing version 2 database is migrated without deleting legacy activity', (t) => {
+  const filename = setup(t);
+  const db = new DatabaseSync(filename);
+  try {
+    db.exec(readFileSync(new URL('../database/002-official-masters.sql', import.meta.url), 'utf8'));
+    db.exec(`INSERT INTO activity (entry) VALUES ('{"summary":"既存の操作履歴"}')`);
+  } finally {
+    db.close();
+  }
+
+  const store = openWorkspace(filename);
+  try {
+    assert.equal(store.read().activity[0].summary, '既存の操作履歴');
+  } finally {
+    store.close();
+  }
+  const migrated = new DatabaseSync(filename, { readOnly: true });
+  t.after(() => migrated.close());
+  assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 3);
+  assert.deepEqual(readAccessAudit(migrated, 0, 100), []);
 });

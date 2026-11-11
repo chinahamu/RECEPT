@@ -87,7 +87,7 @@ export function officialMasters(db: DatabaseSync, transaction: <T>(work: () => T
       WHERE import_id = ? AND (instr(code, ?) > 0 OR instr(name, ?) > 0)
       ORDER BY code LIMIT 100
     `).all(id, query, query) as unknown as MasterRow[],
-    import: (params: ReturnType<typeof masterFileParams>, bytes: Buffer) => {
+    import: (params: ReturnType<typeof masterFileParams>, bytes: Buffer, beforeCommit?: (result: { entry: MasterImport; duplicate: boolean }) => void) => {
       const { kind, filename, publishedOn } = params;
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const rows = parseRows(kind, bytes);
@@ -95,7 +95,11 @@ export function officialMasters(db: DatabaseSync, transaction: <T>(work: () => T
         const existing = db.prepare(`SELECT ${importColumns} FROM master_imports
           WHERE kind = ? AND published_on = ? AND sha256 = ?`).get(kind, publishedOn, sha256) as
           unknown as MasterImport | undefined;
-        if (existing) return { entry: existing, duplicate: true };
+        if (existing) {
+          const result = { entry: existing, duplicate: true };
+          beforeCommit?.(result);
+          return result;
+        }
 
         const importedAt = new Date().toISOString();
         const result = db.prepare(`INSERT INTO master_imports
@@ -105,7 +109,9 @@ export function officialMasters(db: DatabaseSync, transaction: <T>(work: () => T
         const insert = db.prepare('INSERT INTO master_rows (import_id, code, name, fields) VALUES (?, ?, ?, ?)');
         for (const [code, row] of rows) insert.run(id, code, row.name, JSON.stringify(row.fields));
         const entry: MasterImport = { id, kind, filename, publishedOn, importedAt, sha256, rowCount: rows.size };
-        return { entry, duplicate: false };
+        const imported = { entry, duplicate: false };
+        beforeCommit?.(imported);
+        return imported;
       });
     },
   };

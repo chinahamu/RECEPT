@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AuditAccess, AuditActor } from './accessAudit';
 import { requestSchema } from './validation';
 import { openWorkspace } from './workspace';
 import { WorkspaceError } from './errors';
@@ -49,7 +51,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-export function createWorkspaceApi(open = openWorkspace) {
+export function createWorkspaceApi(
+  open = openWorkspace,
+  // Only a server-side authenticator may supply a verified actor.
+  resolveActor: (req: IncomingMessage) => AuditActor | Promise<AuditActor> = () => ({ kind: 'anonymous' }),
+) {
   let store: ReturnType<typeof openWorkspace> | undefined;
   return {
     close() {
@@ -58,8 +64,16 @@ export function createWorkspaceApi(open = openWorkspace) {
     },
     middleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
       const path = req.url?.split('?')[0];
-      const isMasterApi = path === '/api/official-masters';
-      if (!isMasterApi && path !== '/api/workspace' && path !== '/api/claim-preview') return next();
+      if (path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview') return next();
+
+      const access: AuditAccess = {
+        requestId: randomUUID(),
+        requestedAt: new Date().toISOString(),
+        actor: { kind: 'anonymous' },
+        resource: path === '/api/official-masters' ? 'official-masters'
+          : path === '/api/workspace' ? 'workspace' : 'claim-preview',
+        operation: req.method === 'GET' ? 'read' : req.method === 'POST' ? 'write' : 'unsupported-method',
+      };
 
       void (async () => {
         const host = req.headers.host ?? '';
@@ -69,7 +83,11 @@ export function createWorkspaceApi(open = openWorkspace) {
           throw new WorkspaceError(403, 'このデモAPIは同じPCから利用してください。');
         }
 
-        if (isMasterApi) {
+        const actor = await resolveActor(req);
+        if (actor.kind === 'authenticated') {
+          access.actor = { kind: actor.kind, userId: actor.userId, loginAt: actor.loginAt };
+        }
+        if (access.resource === 'official-masters') {
           const params = new URLSearchParams(req.url?.split('?')[1]);
           if (req.method === 'GET') {
             const kind = params.get('clinical');
@@ -81,36 +99,52 @@ export function createWorkspaceApi(open = openWorkspace) {
               throw new WorkspaceError(400, 'マスターの検索条件が正しくありません。');
             }
             store ??= open();
-            sendJson(res, 200, kind ? store.clinical.search(kind, query)
-              : importId === null ? store.masters.list() : store.masters.search(id, query));
+            access.operation = kind ? 'search-clinical-master' : importId === null ? 'list-masters' : 'search-master';
+            sendJson(res, 200, store.readMasters(kind, importId === null ? null : id, query, access));
           } else if (req.method === 'POST') {
+            access.operation = 'import-master';
             if (req.headers['content-type'] !== 'application/octet-stream') {
               throw new WorkspaceError(415, '解凍したマスターファイルを送信してください。');
             }
             const file = masterFileParams(params.get('filename') ?? '', params.get('publishedOn') ?? '');
             const bytes = await readBody(req, MASTER_MAX_BYTES);
             store ??= open();
-            sendJson(res, 200, store.masters.import(file, bytes));
+            sendJson(res, 200, store.importMaster(file, bytes, access));
           } else {
             res.setHeader('Allow', 'GET, POST');
             throw new WorkspaceError(405, '未対応の操作です。');
           }
         } else if (req.method === 'GET') {
           store ??= open();
-          sendJson(res, 200, path === '/api/claim-preview' ? store.preview() : store.read());
+          sendJson(res, 200, path === '/api/claim-preview' ? store.preview(access) : store.read(access));
         } else if (req.method === 'POST' && path === '/api/workspace') {
           const action = await readAction(req);
+          access.operation = action.action.type;
           store ??= open();
-          sendJson(res, 200, store.apply(action));
+          sendJson(res, 200, store.apply(action, access));
         } else {
           res.setHeader('Allow', path === '/api/workspace' ? 'GET, POST' : 'GET');
           throw new WorkspaceError(405, '未対応の操作です。');
         }
       })().catch((error: unknown) => {
-        if (error instanceof WorkspaceError) {
-          sendJson(res, error.status, { error: error.message });
-        } else {
-          sendJson(res, 500, { error: 'SQLiteの処理に失敗しました。DBの設定と空き容量を確認してください。' });
+        const status = error instanceof WorkspaceError ? error.status : 500;
+        try {
+          store ??= open();
+          store.recordFailure(access, status);
+        } catch {
+          console.error(JSON.stringify({
+            event: 'access-audit-unavailable', requestId: access.requestId, at: new Date().toISOString(),
+          }));
+        }
+        if (status === 401 || status === 403 || status >= 500) {
+          console.error(JSON.stringify({
+            event: 'access-audit-request-failed', requestId: access.requestId, status, at: new Date().toISOString(),
+          }));
+        }
+        if (!res.headersSent && !res.destroyed) {
+          sendJson(res, status, {
+            error: error instanceof WorkspaceError ? error.message : 'SQLiteの処理に失敗しました。DBの設定と空き容量を確認してください。',
+          });
         }
       });
     },
