@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test": "node --import tsx --test src/utils/receiptEngine.test.ts server/workspace.test.ts",
-    "db:init": "python3 database/init.py"
+    "db:init": "python3 database/init.py",
+    "audit": "tsx server/reviewAccessAudit.ts"
   },
   "dependencies": {
     "lucide-react": "^0.546.0",
