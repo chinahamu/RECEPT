@@ -16,7 +16,8 @@
     "audit": "node --import tsx server/reviewAccessAudit.ts",
     "db:backup": "node --import tsx server/backupCli.ts",
     "staff": "node --import tsx server/staffCli.ts",
-    "test:integration": "node --test integration/recept-v1/contract.test.mjs"
+    "test:integration": "node --test integration/recept-v1/contract.test.mjs",
+    "test:integration:e2e": "node integration/e2e/run.mjs"
   },
   "dependencies": {
     "ajv": "8.18.0",
