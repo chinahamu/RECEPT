@@ -1,15 +1,16 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AuditAccess } from './accessAudit';
 import { z } from 'zod';
 import { hasStaffRole, type Staff, type StaffRole } from '../src/types/staff';
 import type { Workspace, WorkspaceAction } from '../src/types/workspace';
 import { sessionCookie, staffSessions } from './staffSessions';
-import { isSameOriginApiRequest, protectedResponseHeaders } from './browserProtection';
+import { isLocalRequest, isSameOriginApiRequest, protectedResponseHeaders } from './browserProtection';
 import { requestSchema } from './validation';
 import { openWorkspace } from './workspace';
 import { WorkspaceError } from './errors';
 import { masterFileParams } from './officialMasters';
+import { MAX_BODY_BYTES as integrationMaxBytes } from '../integration/recept-v1/contract.mjs';
 import { MASTER_MAX_BYTES } from '../src/data/officialMasters';
 
 const maxBodyBytes = 4 * 1024 * 1024;
@@ -17,6 +18,21 @@ const credentialsSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
   password: z.string().min(1).max(256),
 });
+
+const integrationId = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+const integrationToken = /^[A-Za-z0-9._~+\/=-]{1,512}$/;
+const matchSchema = z.strictObject({ patientId: z.string().min(1).max(100), chartNumber: z.string().min(1).max(100) });
+
+function integrationSource(req: IncomingMessage) {
+  const { RECEPT_DENCAL_FACILITY_ID: facilityId, RECEPT_DENCAL_SENDER_ID: senderId, RECEPT_DENCAL_TOKEN: token } = process.env;
+  const authorization = /^Bearer ([A-Za-z0-9._~+\/=-]{1,512})$/.exec(req.headers.authorization ?? '')?.[1];
+  if (!facilityId || !/^[0-9]{10}$/.test(facilityId) || !senderId || !integrationId.test(senderId) ||
+      !token || !integrationToken.test(token) || !authorization ||
+      !timingSafeEqual(createHash('sha256').update(token).digest(), createHash('sha256').update(authorization).digest())) {
+    throw new WorkspaceError(401, 'authentication_required');
+  }
+  return { facilityId, senderId };
+}
 
 const actionRoles: Record<WorkspaceAction['type'], StaffRole> = {
   register: 'reception', update: 'physician', fix: 'physician', batchFix: 'physician',
@@ -84,19 +100,57 @@ export function createWorkspaceApi(
     middleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
       const path = req.url?.split('?')[0];
       const isSession = path === '/api/session' || path === '/api/login' || path === '/api/logout';
-      if (!isSession && path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview' &&
+      const machine = path?.startsWith('/api/integration/v1/') ?? false;
+      const inboxPath = /^\/api\/integration\/inbox(?:\/([0-9]+)(\/match)?)?$/.exec(path ?? '');
+      if (!machine && !inboxPath && !isSession && path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview' &&
           path !== '/api/claim-records') return next();
 
       const access: AuditAccess = {
         requestId: randomUUID(),
         requestedAt: new Date().toISOString(),
         actor: { kind: 'anonymous' },
-        resource: isSession ? 'session' : path === '/api/official-masters' ? 'official-masters'
+        resource: machine || inboxPath ? 'dencal-inbox' : isSession ? 'session' : path === '/api/official-masters' ? 'official-masters'
           : path === '/api/workspace' ? 'workspace' : path === '/api/claim-records' ? 'claim-records' : 'claim-preview',
         operation: req.method === 'GET' ? 'read' : req.method === 'POST' ? 'write' : 'unsupported-method',
       };
 
       void (async () => {
+        if (machine) {
+          if (!isLocalRequest(req) || req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined || req.headers.cookie !== undefined) {
+            throw new WorkspaceError(403, 'source_scope_mismatch');
+          }
+          const source = integrationSource(req);
+          access.actor = { kind: 'integration', ...source };
+          store ??= open();
+          if (path === '/api/integration/v1/encounters') {
+            access.operation = 'receive-dencal';
+            if (req.method !== 'POST') {
+              res.setHeader('Allow', 'POST');
+              throw new WorkspaceError(405, 'invalid_payload');
+            }
+            if (req.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+              throw new WorkspaceError(415, 'unsupported_media_type');
+            }
+            const bytes = await readBody(req, integrationMaxBytes);
+            const result = store.receiveDencal(bytes, source, access);
+            sendJson(res, result.httpStatus, result.body);
+            return;
+          }
+
+          const encoded = /^\/api\/integration\/v1\/receipts\/([^/]+)$/.exec(path ?? '')?.[1];
+          let id = '';
+          try { id = decodeURIComponent(encoded ?? ''); } catch { /* Treat malformed paths as absent. */ }
+          if (!integrationId.test(id)) throw new WorkspaceError(404, 'receipt_not_found');
+          access.operation = 'read-dencal-receipt';
+          if (req.method !== 'GET') {
+            res.setHeader('Allow', 'GET');
+            throw new WorkspaceError(405, 'invalid_payload');
+          }
+          const result = store.readDencalReceipt(source, id, access);
+          sendJson(res, result ? 200 : 404, result ?? { error: 'receipt_not_found' });
+          return;
+        }
+
         if (!isSameOriginApiRequest(req)) {
           throw new WorkspaceError(403, 'このデモAPIは同じPCから利用してください。');
         }
@@ -162,6 +216,35 @@ export function createWorkspaceApi(
         }
 
         const { staff } = await requireRole('reception');
+        if (inboxPath) {
+          const [, id, matching] = inboxPath;
+          const method = matching ? 'POST' : 'GET';
+          if (req.method !== method) {
+            res.setHeader('Allow', method);
+            throw new WorkspaceError(405, '未対応の操作です。');
+          }
+          const seq = id ? Number(id) : null;
+          if (seq !== null && (!Number.isSafeInteger(seq) || seq < 1)) throw new WorkspaceError(400, '受信番号が正しくありません。');
+          if (seq === null) {
+            const before = new URLSearchParams(req.url?.split('?')[1]).get('before');
+            const cursor = before === null ? null : Number(before);
+            if (before !== null && cursor !== null && (!/^[0-9]+$/.test(before) || !Number.isSafeInteger(cursor) || cursor < 1)) {
+              throw new WorkspaceError(400, '受信一覧の照会条件が正しくありません。');
+            }
+            access.operation = 'list-dencal-inbox';
+            sendJson(res, 200, currentStore.listDencal(cursor, access));
+          } else if (matching) {
+            access.operation = 'match-dencal-patient';
+            const input = matchSchema.safeParse(await readJson(req, 4096));
+            if (!input.success) throw new WorkspaceError(400, '紐付け先を確認してください。');
+            await requireRole('reception');
+            sendJson(res, 200, currentStore.matchDencal(seq, input.data.patientId, input.data.chartNumber, access));
+          } else {
+            access.operation = 'read-dencal-inbox';
+            sendJson(res, 200, currentStore.readDencal(seq, access));
+          }
+          return;
+        }
         if (access.resource === 'official-masters') {
           const params = new URLSearchParams(req.url?.split('?')[1]);
           if (req.method === 'GET') {
@@ -239,7 +322,9 @@ export function createWorkspaceApi(
           throw new WorkspaceError(405, '未対応の操作です。');
         }
       })().catch((error: unknown) => {
-        const status = error instanceof WorkspaceError ? error.status : 500;
+        const status = error instanceof WorkspaceError
+          ? (machine && error.status >= 500 ? 503 : error.status)
+          : machine ? 503 : 500;
         try {
           store ??= open();
           store.recordAccess(access, status);
@@ -255,7 +340,9 @@ export function createWorkspaceApi(
         }
         if (!res.headersSent && !res.destroyed) {
           sendJson(res, status, {
-            error: error instanceof WorkspaceError ? error.message : 'SQLiteの処理に失敗しました。DBの設定と空き容量を確認してください。',
+            error: machine ? (status >= 500 ? 'temporarily_unavailable'
+              : status === 413 ? 'payload_too_large' : error instanceof WorkspaceError ? error.message : 'invalid_payload')
+              : error instanceof WorkspaceError ? error.message : 'SQLiteの処理に失敗しました。DBの設定と空き容量を確認してください。',
           });
         }
       });

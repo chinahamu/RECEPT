@@ -80,7 +80,19 @@ OS上でDBを管理するユーザーが、`npm run staff -- create <職員ID> <
 
 ## DENCAL連携
 
-[DENCAL連携の設計計画](docs/dencal-integration.md)では、受信・患者突合・請求下書きへの反映と実装順序をまとめています。
+DENCALからの受信・受領結果照会と、RECEPTの **DENCAL受信** 画面での患者突合を利用できます。送受信とも同一PCの試作構成です。DENCALの **実施記録・RECEPT連携** で表示される施設ID・送信元IDを確認し、RECEPTを起動する環境で次の値を設定します。
+
+| 環境変数 | 値 |
+| --- | --- |
+| `RECEPT_DENCAL_FACILITY_ID` | DENCALに表示される施設ID（10桁） |
+| `RECEPT_DENCAL_SENDER_ID` | DENCALに表示される送信元ID |
+| `RECEPT_DENCAL_TOKEN` | 連携専用の共有トークン。DENCAL側の `DENCAL_RECEPT_TOKEN` と同じ値 |
+
+RECEPTの起動後、DENCAL側の `DENCAL_RECEPT_URL` をRECEPTのループバックURLに向けます。設定する送信元は1件です。職員がRECEPTにログインし、**DENCAL受信 → 詳細** から、DENCALの患者IDとRECEPTのカルテ番号・氏名・生年月日を照合して紐付けます。台帳に患者がいなければ、既存の **患者台帳** で登録してから紐付けます。
+
+送信の再試行で同一データが重複登録されることはありません。未紐付け・未登録コード・対象外の算定条件や単位・先行版待ちは確認待ちとして表示されます。受領結果を開くたびに、患者台帳と現時点の取込マスターで再判定します。デモリセット後は受信履歴を保持し、台帳を入れ直すため患者の紐付けを再確認します。請求下書きへの反映は後続工程です。
+
+[設計計画](docs/dencal-integration.md) · [共通の連携仕様 v1](integration/recept-v1/README.md)
 
 ## 診療報酬の算定とオンライン資格確認
 

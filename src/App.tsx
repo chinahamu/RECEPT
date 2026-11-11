@@ -1,3 +1,4 @@
+import { DencalInboxView } from './components/DencalInboxView';
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -20,7 +21,7 @@ import { ClaimRecordsView } from './components/ClaimRecordsView';
 import { ClaimCsvModal } from './components/ClaimCsvModal';
 import { HardDrive, Wifi, WifiOff } from 'lucide-react';
 
-type ActiveTab = 'workstation' | 'audit' | 'patients' | 'claims' | 'server';
+type ActiveTab = 'workstation' | 'audit' | 'patients' | 'claims' | 'server' | 'dencal-inbox';
 
 const API = '/api/workspace';
 
@@ -282,6 +283,12 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
           >
             レセプト自動点検 ({totalErrorCount})
           </a>
+          <a href="#dencal-inbox" onClick={(event) => { event.preventDefault(); setActiveTab('dencal-inbox'); }}
+            aria-current={activeTab === 'dencal-inbox' ? 'page' : undefined}
+            className={`py-1 whitespace-nowrap shrink-0 border-b-2 ${activeTab === 'dencal-inbox'
+              ? 'border-slate-900 text-slate-900 font-semibold' : 'border-transparent hover:text-slate-900'}`}>
+            DENCAL受信
+          </a>
           <a
             href="#patients"
             onClick={(e) => {
@@ -442,6 +449,8 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
           />
         )}
 
+        {activeTab === 'dencal-inbox' && <DencalInboxView patients={patients}
+          refreshPatients={async () => { setWorkspace(await requestJson<Workspace>(API)); }} />}
         {activeTab === 'claims' && canEdit && <ClaimRecordsView onOpen={openClaimRecord} busy={busy} />}
         {activeTab === 'server' && canManage && (
           <LocalServerMasterView

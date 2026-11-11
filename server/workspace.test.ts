@@ -310,7 +310,7 @@ test('an existing version 2 database is migrated without deleting legacy activit
   }
   const migrated = new DatabaseSync(filename, { readOnly: true });
   t.after(() => migrated.close());
-  assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 5);
+  assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 6);
   assert.deepEqual(readAccessAudit(migrated, 0, 100), []);
 });
 

@@ -3,13 +3,14 @@ import type { DatabaseSync } from 'node:sqlite';
 
 export type AuditActor =
   | { kind: 'authenticated'; userId: string; loginAt: string }
-  | { kind: 'anonymous' };
+  | { kind: 'anonymous' }
+  | { kind: 'integration'; facilityId: string; senderId: string };
 
 export type AuditAccess = {
   requestId: string;
   requestedAt: string;
   actor: AuditActor;
-  resource: 'workspace' | 'claim-preview' | 'claim-records' | 'official-masters' | 'session';
+  resource: 'workspace' | 'claim-preview' | 'claim-records' | 'official-masters' | 'session' | 'dencal-inbox';
   operation: string;
 };
 
@@ -20,6 +21,7 @@ type AuditResult = {
   claimRecordIds?: string[];
   masterImportId?: number;
   duplicate?: boolean;
+  integrationIds?: string[];
 };
 
 type AuditRow = { seq: number; payload: string; previous_hash: string; hash: string };

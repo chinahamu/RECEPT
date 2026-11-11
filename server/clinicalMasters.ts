@@ -50,6 +50,9 @@ export function clinicalMasters(db: DatabaseSync) {
   const search = db.prepare(`${base}
     AND (instr(code, ?) > 0 OR instr(name, ?) > 0) ORDER BY code`);
   return {
+    contains(kind: ClinicalKind, code: string, date: string) {
+      return Boolean(lookup.get(kind, date, code));
+    },
     lookup<K extends ClinicalKind>(kind: K, code: string, date: string) {
       const row = lookup.get(kind, date, code) as StoredRow | undefined;
       const entry = row && toEntry[kind](row, date.replaceAll('-', '')) as ClinicalMasterEntries[K] | undefined;

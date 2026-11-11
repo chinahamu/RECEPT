@@ -4,6 +4,7 @@ import {
   mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { verifyDencalInbox } from './dencalInbox';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { verifyAccessAudit } from './accessAudit';
@@ -83,6 +84,7 @@ function inspectSnapshot(path: string) {
     if (databaseSchemaVersion >= 3) tables.push('access_audit');
     if (databaseSchemaVersion >= 4) tables.push('claim_records', 'claim_draft_editor');
     if (databaseSchemaVersion >= 5) tables.push('staff_accounts');
+    if (databaseSchemaVersion >= 6) tables.push('dencal_inbox', 'dencal_patient_matches');
     const exists = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?");
     if (tables.some((name) => !exists.get(name)) || !db.prepare('SELECT revision FROM workspace WHERE id = 1').get()) {
       throw new Error('RECEPTの必須テーブルまたは作業領域が見つかりません。');
@@ -90,10 +92,12 @@ function inspectSnapshot(path: string) {
     const triggers = [];
     if (databaseSchemaVersion >= 3) triggers.push('access_audit_append_only', 'access_audit_no_update', 'access_audit_no_delete');
     if (databaseSchemaVersion >= 4) triggers.push('claim_records_append', 'claim_records_no_update', 'claim_records_no_delete');
+    if (databaseSchemaVersion >= 6) triggers.push('dencal_inbox_no_update', 'dencal_inbox_no_delete', 'dencal_inbox_no_replace');
     const hasTrigger = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?");
     if (triggers.some((name) => !hasTrigger.get(name))) {
       throw new Error('監査ログまたは確定記録を保護するトリガーが見つかりません。');
     }
+    if (databaseSchemaVersion >= 6) verifyDencalInbox(db);
     return {
       databaseSchemaVersion,
       auditCheckpoint: databaseSchemaVersion >= 3 ? verifyAccessAudit(db) : null,

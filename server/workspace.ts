@@ -9,6 +9,8 @@ import {
   generateDemoClaimCsv, runMhlwReceiptCheck,
 } from '../src/utils/receiptEngine';
 import type { ValidRequest } from './validation';
+import { dencalInbox } from './dencalInbox';
+import type { IntegrationSource } from '../src/types/dencalInbox';
 import { WorkspaceError } from './errors';
 import { officialMasters } from './officialMasters';
 import { clinicalMasters } from './clinicalMasters';
@@ -223,6 +225,7 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       if (version === 1 || version === 2) db.exec(readFileSync(new URL('../database/003-access-audit.sql', import.meta.url), 'utf8'));
       if (version < 4) db.exec(readFileSync(new URL('../database/004-claim-records.sql', import.meta.url), 'utf8'));
       if (version < 5) db.exec(readFileSync(new URL('../database/005-staff.sql', import.meta.url), 'utf8'));
+      if (version < 6) db.exec(readFileSync(new URL('../database/006-dencal-inbox.sql', import.meta.url), 'utf8'));
       if (db.prepare('SELECT seeded FROM workspace WHERE id = 1').get()?.seeded) return;
       replacePatients(db, INITIAL_PATIENTS);
       db.exec('UPDATE workspace SET seeded = 1 WHERE id = 1');
@@ -241,6 +244,7 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
   }
 
   const clinical = clinicalMasters(db);
+  const inbox = dencalInbox(db, clinical);
   const masters = officialMasters(db, (work) => transaction(db, work, true));
   return {
     close: () => db.close(),
@@ -283,6 +287,8 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       return result;
     }, true),
     apply: ({ revision, action }: ValidRequest, access?: AuditAccess): WorkspaceResult => transaction(db, () => {
+      const actor = access?.actor;
+      if (actor?.kind === 'integration') throw new WorkspaceError(403, '職員IDでログインしてください。');
       if (action.type === 'snapshot' || action.type === 'exportCsv') requireDataExports();
       if (revision !== revisionNow()) {
         throw new WorkspaceError(409, '別の画面でデータが更新されました。最新データを読み込んでから再操作してください。');
@@ -291,7 +297,7 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       let affectedPatientIds: string[];
       if (action.type === 'finalize') {
         const patient = patientForClaim(action.patientId);
-        claimRecord = claims.finalize(patient, revision, action.reviewHash, action.correctionReason, access?.actor);
+        claimRecord = claims.finalize(patient, revision, action.reviewHash, action.correctionReason, actor);
         const calc = claimRecord.snapshot.calculation;
         record(db, 'BILLING_UPDATE', patient.chartNumber,
           `デモ会計確定: 総点数 ${calc.totalPoints}点 / 窓口負担 ${calc.copayRoundedYen}円（第${claimRecord.version}版）`);
@@ -300,7 +306,7 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
         affectedPatientIds = applyAction(db, clinical, action);
         if (action.type === 'register' || action.type === 'update' || action.type === 'fix' || action.type === 'batchFix') {
           claims.noteEdit(affectedPatientIds, {
-            actor: access?.actor ?? { kind: 'anonymous' }, at: new Date().toISOString(),
+            actor: actor ?? { kind: 'anonymous' }, at: new Date().toISOString(),
           });
         }
       }
@@ -326,6 +332,35 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       masters.import(file, bytes, ({ entry, duplicate }) => {
         appendAccessAudit(db, access, { status: 200, masterImportId: entry.id, duplicate });
       }),
+    receiveDencal: (bytes: Buffer, source: IntegrationSource, access: AuditAccess) => transaction(db, () => {
+      const result = inbox.receive(bytes, source);
+      appendAccessAudit(db, access, {
+        status: result.httpStatus, duplicate: result.duplicate,
+        integrationIds: result.integrationId ? [result.integrationId] : undefined,
+      });
+      return result;
+    }, true),
+    readDencalReceipt: (source: IntegrationSource, id: string, access: AuditAccess) => transaction(db, () => {
+      const result = inbox.receipt(source, id);
+      appendAccessAudit(db, access, { status: result ? 200 : 404, integrationIds: result ? [id] : undefined });
+      return result;
+    }, true),
+    listDencal: (before: number | null, access: AuditAccess) => transaction(db, () => {
+      const result = inbox.list(before);
+      appendAccessAudit(db, access, { status: 200, integrationIds: result.records.map(({ integrationId }) => integrationId) });
+      return result;
+    }, true),
+    readDencal: (seq: number, access: AuditAccess) => transaction(db, () => {
+      const result = inbox.detail(seq);
+      appendAccessAudit(db, access, { status: 200, integrationIds: [result.integrationId], patientIds: result.patient ? [result.patient.id] : [] });
+      return result;
+    }, true),
+    matchDencal: (seq: number, patientId: string, chartNumber: string, access: AuditAccess) => transaction(db, () => {
+      if (access.actor.kind !== 'authenticated') throw new WorkspaceError(403, '職員IDでログインしてください。');
+      const result = inbox.match(seq, patientId, chartNumber, access.actor.userId);
+      appendAccessAudit(db, access, { status: 200, integrationIds: [result.integrationId], patientIds: [patientId] });
+      return result;
+    }, true),
     recordAccess: (access: AuditAccess, status: number) =>
       transaction(db, () => appendAccessAudit(db, access, { status }), true),
   };
