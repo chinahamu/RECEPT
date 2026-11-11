@@ -42,6 +42,24 @@ function decode(row: RecordRow): ClaimRecord {
   return { ...summary(row, body.confirmedAt), ...body, sha256: row.sha256 };
 }
 
+export function verifyClaimRecords(db: DatabaseSync) {
+  let count = 0;
+  let previous: RecordRow | undefined;
+  const rows = db.prepare(`SELECT ${columns}, body, sha256 FROM claim_records ORDER BY patient_id, month, version`);
+  for (const row of rows.iterate() as Iterable<RecordRow>) {
+    const record = decode(row);
+    const priorVersion = previous?.patient_id === row.patient_id && previous.month === row.month ? previous : undefined;
+    if (record.snapshot.patient.id !== row.patient_id || record.snapshot.month !== row.month ||
+        row.version !== (priorVersion?.version ?? 0) + 1 ||
+        row.previous_id !== (priorVersion?.id ?? null)) {
+      throw new WorkspaceError(500, '確定記録の訂正履歴に不整合があります。');
+    }
+    previous = row;
+    count++;
+  }
+  return count;
+}
+
 function snapshotFor(db: DatabaseSync, source: PatientRecord): ClaimSnapshot {
   const { notes: _notes, ...profile } = source;
   const patient = {

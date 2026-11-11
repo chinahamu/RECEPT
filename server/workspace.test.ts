@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import test from 'node:test';
@@ -472,4 +473,90 @@ test('the database and sidecars must be private regular files on POSIX', { skip:
   assert.throws(() => openWorkspace(alias), /リンクではない/);
   symlinkSync(filename, fresh + '-wal');
   assert.throws(() => openWorkspace(fresh), /リンクではない/);
+});
+
+
+test('backup CLI preserves committed WAL data, audit events, masters and claims across a separate restore', (t) => {
+  const filename = setup(t);
+  const store = openWorkspace(filename, true);
+  const writer = new DatabaseSync(filename);
+  t.after(() => { writer.close(); store.close(); });
+  writer.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0');
+  const access = {
+    requestId: 'backup-test', requestedAt: '2026-11-11T00:00:00.000Z',
+    actor: { kind: 'anonymous' }, resource: 'workspace', operation: 'finalize',
+  } as const;
+  const patientId = INITIAL_PATIENTS[0].id;
+  const review = store.previewConfirmation(patientId);
+  const result = store.apply(command(review.revision, {
+    type: 'finalize', patientId, reviewHash: review.reviewHash,
+  }), access);
+  const comment = Array<string>(30).fill('0');
+  comment.splice(1, 6, 'C', '8', '10', '1', '0', '');
+  comment[22] = '810000001';
+  const master = store.masters.import(masterFileParams('c_20261110.csv', '2026-11-10'),
+    Buffer.from(comment.map((field) => `"${field}"`).join(',') + '\r\n')).entry;
+  assert.ok(statSync(filename + '-wal').size > 0);
+
+  const run = (...args: string[]) => JSON.parse(execFileSync(process.execPath,
+    ['--import', 'tsx', 'server/backupCli.ts', ...args], {
+      env: { ...process.env, RECEPT_DB: filename }, encoding: 'utf8', stdio: 'pipe',
+    }));
+  const archive = join(dirname(filename), 'backup output');
+  writer.exec('BEGIN IMMEDIATE; UPDATE workspace SET offline = 1 WHERE id = 1');
+  const first = run('create', archive);
+  writer.exec('COMMIT');
+  const second = run('create', archive);
+  assert.notEqual(first.generation, second.generation);
+  assert.deepEqual(run('verify', first.generation), first);
+  assert.equal(first.integrity.claimRecords, 1);
+  assert.equal(first.integrity.auditCheckpoint.seq, 1);
+
+  const restore = join(dirname(filename), 'restored.sqlite3');
+  assert.equal(run('restore', first.generation, restore).restoredDatabase, restore);
+  assert.throws(() => run('restore', first.generation, filename), /復元先が既に存在/);
+  assert.throws(() => run('restore', first.generation, restore), /復元先が既に存在/);
+  const orphaned = join(dirname(filename), 'orphaned.sqlite3');
+  writeFileSync(orphaned + '-wal', '', { mode: 0o600 });
+  assert.throws(() => run('restore', first.generation, orphaned), /DBの関連ファイル/);
+  assert.equal(existsSync(orphaned), false);
+
+  const restored = openWorkspace(restore, true);
+  t.after(restored.close);
+  assert.equal(store.read().isOfflineMode, true);
+  assert.equal(restored.read().isOfflineMode, false);
+  assert.equal(restored.read().revision, result.workspace.revision);
+  assert.deepEqual(restored.masters.list().map((entry) => ({ ...entry })), [master]);
+  assert.equal(restored.preview().csv, store.preview().csv);
+  assert.equal(restored.previewConfirmation(patientId).previous?.id, result.claimRecord?.id);
+  const audit = new DatabaseSync(restore, { readOnly: true });
+  try {
+    assert.deepEqual(verifyAccessAudit(audit), first.integrity.auditCheckpoint);
+  } finally {
+    audit.close();
+  }
+
+  const incomplete = join(archive, 'incomplete');
+  mkdirSync(incomplete, { mode: 0o700 });
+  assert.throws(() => run('verify', incomplete), /完了済みバックアップ/);
+
+  const damaged = join(second.generation, 'recept.sqlite3');
+  const manifestPath = join(second.generation, 'manifest.json');
+  const damagedDb = new DatabaseSync(damaged);
+  try {
+    const trigger = damagedDb.prepare("SELECT sql FROM sqlite_schema WHERE name = 'claim_records_no_update'").get();
+    damagedDb.exec("DROP TRIGGER claim_records_no_update; UPDATE claim_records SET sha256 = printf('%064d', 0)");
+    damagedDb.exec(String(trigger?.sql));
+  } finally {
+    damagedDb.close();
+  }
+  const content = readFileSync(damaged);
+  writeFileSync(manifestPath, JSON.stringify({
+    ...second.manifest, bytes: content.length, sha256: createHash('sha256').update(content).digest('hex'),
+  }));
+  assert.throws(() => run('verify', second.generation), /確定記録の整合性/);
+  appendFileSync(damaged, 'invalid');
+  const rejected = join(dirname(filename), 'rejected.sqlite3');
+  assert.throws(() => run('restore', second.generation, rejected), /サイズまたはSHA-256/);
+  assert.equal(existsSync(rejected), false);
 });
