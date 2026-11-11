@@ -14,7 +14,8 @@
     "test": "node --import tsx --test src/utils/receiptEngine.test.ts server/workspace.test.ts",
     "db:init": "python3 database/init.py",
     "audit": "node --import tsx server/reviewAccessAudit.ts",
-    "db:backup": "node --import tsx server/backupCli.ts"
+    "db:backup": "node --import tsx server/backupCli.ts",
+    "staff": "node --import tsx server/staffCli.ts"
   },
   "dependencies": {
     "lucide-react": "^0.546.0",

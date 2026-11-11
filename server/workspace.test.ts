@@ -10,7 +10,8 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 import { INITIAL_PATIENTS } from '../src/data/demoWorkspace';
 import type { WorkspaceAction } from '../src/types/workspace';
-import { createWorkspaceApi } from './api';
+import { createWorkspaceApi as createAuthenticatedApi } from './api';
+import { staffSessions } from './staffSessions';
 import { requestSchema } from './validation';
 import { openWorkspace, WorkspaceError } from './workspace';
 import { readAccessAudit, verifyAccessAudit } from './accessAudit';
@@ -136,15 +137,23 @@ test('stale commands and failed updates leave no partial writes', (t) => {
   assert.deepEqual(reset.activity, []);
 });
 
+function testSession(userId = 'test-admin', loginAt = '2026-11-11T00:00:00.000Z') {
+  return { staff: { id: userId, role: 'admin' as const }, sessionId: 'test-session', loginAt, expiresAt: Date.now() + 1_800_000 };
+}
+
+function createWorkspaceApi(open: typeof openWorkspace, resolve = testSession) {
+  return createAuthenticatedApi(open, () => resolve());
+}
+
 function requestApi(api: ReturnType<typeof createWorkspaceApi>) {
-  return function request(url: string, method: string, value?: unknown, origin?: string, fetchSite?: string) {
+  return function request(url: string, method: string, value?: unknown, origin?: string, fetchSite?: string, cookie?: string, sessionId?: string) {
     const raw = Buffer.isBuffer(value);
     const body = raw ? value : Buffer.from(JSON.stringify(value ?? null));
     const req = Object.assign(Readable.from(value === undefined ? [] : [body]), {
       url, method,
       headers: {
         host: 'localhost:5173', 'content-type': raw ? 'application/octet-stream' : 'application/json', origin,
-        'x-user-id': 'untrusted-client-identity', 'sec-fetch-site': fetchSite,
+        'x-user-id': 'untrusted-client-identity', 'sec-fetch-site': fetchSite, cookie, 'x-recept-session': sessionId,
       },
       socket: { remoteAddress: '127.0.0.1' },
     });
@@ -152,8 +161,8 @@ function requestApi(api: ReturnType<typeof createWorkspaceApi>) {
       let status = 0;
       let headers: Record<string, string> = {};
       const res = {
-        setHeader() {},
-        writeHead(code: number, responseHeaders: Record<string, string>) { status = code; headers = responseHeaders; },
+        setHeader(name: string, value: string) { headers[name] = value; },
+        writeHead(code: number, responseHeaders: Record<string, string>) { status = code; headers = { ...headers, ...responseHeaders }; },
         end(body: string) { resolve({ status, data: JSON.parse(body), headers }); },
       };
       api.middleware(req as unknown as IncomingMessage, res as unknown as ServerResponse, () => reject(new Error('Unexpected next()')));
@@ -235,7 +244,8 @@ test('access audit records API disclosure, changes and failures across reset and
   assert.equal(new Set(events.map(({ requestId }) => requestId)).size, events.length);
   assert.ok(events.every(({ requestedAt, recordedAt }) => !Number.isNaN(Date.parse(requestedAt)) &&
     !Number.isNaN(Date.parse(recordedAt))));
-  assert.ok(events.every(({ actor }) => actor.kind === 'anonymous'));
+  assert.equal(events[7].actor.kind, 'anonymous');
+  assert.ok(events.filter((_, i) => i !== 7).every(({ actor }) => actor.kind === 'authenticated'));
   assert.deepEqual(events[1].affectedPatientIds, [patientId]);
   assert.ok(events[2].patientIds?.includes(patientId));
   assert.ok(events[3].patientIds?.includes(patientId));
@@ -263,7 +273,7 @@ test('access audit records API disclosure, changes and failures across reset and
 test('audit stores only a trusted actor and blocks reads and writes when their audit append fails', async (t) => {
   const filename = setup(t);
   const actor = { kind: 'authenticated', userId: 'staff-001', loginAt: '2026-11-11T00:00:00.000Z' } as const;
-  const api = createWorkspaceApi(() => openWorkspace(filename), async () => ({ ...actor, token: 'do-not-log' }));
+  const api = createWorkspaceApi(() => openWorkspace(filename), () => ({ ...testSession(actor.userId, actor.loginAt), token: 'do-not-log' }));
   t.after(api.close);
   const request = requestApi(api);
   assert.equal((await request('/api/workspace', 'GET')).status, 200);
@@ -300,7 +310,7 @@ test('an existing version 2 database is migrated without deleting legacy activit
   }
   const migrated = new DatabaseSync(filename, { readOnly: true });
   t.after(() => migrated.close());
-  assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 4);
+  assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 5);
   assert.deepEqual(readAccessAudit(migrated, 0, 100), []);
 });
 
@@ -310,7 +320,7 @@ test('claim confirmation freezes the reviewed version, requires a correction rea
   const editor = { kind: 'authenticated', userId: 'staff-input', loginAt: '2026-11-11T00:00:00.000Z' } as const;
   const confirmer = { ...editor, userId: 'staff-confirm' };
   let actor: typeof editor | typeof confirmer = editor;
-  const api = createWorkspaceApi(() => openWorkspace(filename, true), () => actor);
+  const api = createWorkspaceApi(() => openWorkspace(filename, true), () => testSession(actor.userId, actor.loginAt));
   t.after(api.close);
   const request = requestApi(api);
   const patient = INITIAL_PATIENTS[0];
@@ -559,4 +569,102 @@ test('backup CLI preserves committed WAL data, audit events, masters and claims 
   const rejected = join(dirname(filename), 'rejected.sqlite3');
   assert.throws(() => run('restore', second.generation, rejected), /サイズまたはSHA-256/);
   assert.equal(existsSync(rejected), false);
+});
+
+
+test('staff sessions enforce server-side roles, audit the verified user and are revoked on logout or disable', async (t) => {
+  const filename = setup(t);
+  const store = openWorkspace(filename, true);
+  t.after(store.close);
+  const receptionPassword = store.accounts.create('test-reception', 'reception');
+  const physicianPassword = store.accounts.create('test-physician', 'physician');
+  const adminPassword = store.accounts.create('test-admin', 'admin');
+  const api = createAuthenticatedApi(() => openWorkspace(filename, true));
+  t.after(api.close);
+  const request = requestApi(api);
+  for (const path of ['/api/workspace', '/api/claim-preview', '/api/claim-records', '/api/official-masters']) {
+    assert.equal((await request(path, 'GET')).status, 401);
+  }
+
+  async function login(id: string, password: string) {
+    const response = await request('/api/login', 'POST', { id, password }, 'http://localhost:5173', 'same-origin');
+    assert.equal(response.status, 200);
+    assert.match(response.headers['Set-Cookie'], /HttpOnly; SameSite=Strict; Max-Age=1800/);
+    assert.equal(response.data.staff.id, id);
+    assert.equal(response.data.password, undefined);
+    return response.headers['Set-Cookie'].split(';')[0];
+  }
+  assert.equal((await request('/api/login', 'POST', { id: 'test-admin', password: 'wrong' })).status, 401);
+  assert.equal((await request('/api/login', 'POST', { id: 'test-admin', password: adminPassword }, 'https://other.example')).status, 403);
+  const clerk = await login('test-reception', receptionPassword);
+  const doctor = await login('test-physician', physicianPassword);
+  const admin = await login('test-admin', adminPassword);
+  const use = (cookie: string, path: string, method = 'GET', value?: unknown) =>
+    request(path, method, value, undefined, undefined, cookie);
+
+  const workspace = await use(clerk, '/api/workspace');
+  assert.equal(workspace.status, 200);
+  assert.deepEqual(workspace.data.activity, []);
+  assert.equal(workspace.data.dataExportsEnabled, false);
+  const patientId = workspace.data.patients[0].id;
+  const claimPath = `/api/claim-records?patientId=${patientId}`;
+  assert.equal((await use(clerk, claimPath)).status, 403);
+  assert.equal((await use(clerk, '/api/workspace', 'POST', command(0, { type: 'reset' }))).status, 403);
+  assert.equal((await use(clerk, '/api/workspace', 'POST', command(0, {
+    type: 'register', patient: INITIAL_PATIENTS[0],
+  }))).status, 403);
+  assert.equal((await use(clerk, '/api/official-masters', 'POST', Buffer.from('demo'))).status, 403);
+  assert.equal((await use(doctor, '/api/claim-preview')).status, 403);
+
+  const doctorSession = (await use(doctor, '/api/session')).data;
+  const staleTab = await request('/api/workspace', 'GET', undefined, undefined, undefined, admin, doctorSession.sessionId);
+  assert.equal(staleTab.status, 401);
+  assert.equal(staleTab.data.patients, undefined);
+  const reviewed = (await use(doctor, claimPath)).data;
+  const finalized = await use(doctor, '/api/workspace', 'POST', command(reviewed.revision, {
+    type: 'finalize', patientId, reviewHash: reviewed.reviewHash,
+  }));
+  assert.equal(finalized.status, 200);
+  assert.equal(finalized.data.claimRecord.confirmedBy.userId, 'test-physician');
+  const detailPath = `/api/claim-records?id=${finalized.data.claimRecord.id}`;
+  assert.equal((await use(doctor, detailPath)).status, 200);
+  assert.equal((await use(doctor, detailPath + '&export=1')).status, 403);
+  assert.equal((await use(admin, detailPath + '&export=1')).status, 200);
+  assert.equal((await use(admin, '/api/claim-preview')).status, 200);
+
+  assert.equal((await use(doctor, '/api/logout', 'POST', {})).status, 200);
+  assert.equal((await use(doctor, '/api/workspace')).status, 401);
+  store.accounts.disable('test-reception');
+  assert.equal((await use(clerk, '/api/session')).status, 401);
+  const changedPassword = store.accounts.reset('test-admin');
+  assert.equal((await use(admin, '/api/session')).status, 401);
+  const renewed = await login('test-admin', changedPassword);
+  assert.equal((await use(renewed, '/api/session')).status, 200);
+  api.close();
+  assert.equal((await use(renewed, '/api/session')).status, 401);
+
+  const db = new DatabaseSync(filename, { readOnly: true });
+  try {
+    const audit = readAccessAudit(db, 0, 100).map(({ event }) => event);
+    assert.ok(audit.some(({ operation, actor }) => operation === 'logout' &&
+      actor.kind === 'authenticated' && actor.userId === 'test-physician'));
+    assert.ok(audit.some(({ operation, status, actor }) => operation === 'login' &&
+      status === 200 && actor.kind === 'authenticated' && actor.userId === 'test-admin'));
+    assert.ok(!JSON.stringify(audit).includes(adminPassword));
+    assert.equal(db.prepare("SELECT length(password_hash) AS n FROM staff_accounts WHERE id = 'test-admin'").get()?.n, 32);
+  } finally {
+    db.close();
+  }
+});
+
+test('staff session expires at 30 minutes even when the account is active', () => {
+  let time = Date.parse('2026-11-11T00:00:00.000Z');
+  const sessions = staffSessions(() => time);
+  const req = { headers: {} } as IncomingMessage;
+  const staff = { id: 'test-admin', role: 'admin' } as const;
+  const session = sessions.create({ ...staff, version: 1 }, req);
+  req.headers.cookie = `recept_session=${session.token}`;
+  assert.equal(sessions.get(req, () => staff)?.staff, staff);
+  time = session.expiresAt;
+  assert.equal(sessions.get(req, () => staff), null);
 });

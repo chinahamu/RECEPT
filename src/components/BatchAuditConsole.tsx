@@ -14,6 +14,7 @@ import { CLINIC_FACILITY_INFO, DEMO_MONTH } from '../data/demoWorkspace';
 interface BatchAuditConsoleProps {
   patients: PatientView[];
   onApplyAutoFix: (patientId: string, findingId: string) => void;
+  canEdit: boolean;
   onBatchAutoFixAll: () => void;
   onOpenClaimCsv?: () => void;
   onNavigateToWorkstation: (patientId: string) => void;
@@ -23,6 +24,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
   patients,
   onApplyAutoFix,
   onBatchAutoFixAll,
+  canEdit,
   onOpenClaimCsv,
   onNavigateToWorkstation,
 }) => {
@@ -204,6 +206,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
           {(summaryStats.totalErrors > 0 || summaryStats.totalWarnings > 0) && (
             <button
               type="button"
+              disabled={!canEdit}
               onClick={onBatchAutoFixAll}
               className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
             >
@@ -375,7 +378,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
                         </div>
                       </div>
 
-                      {finding.fixAction && (
+                      {canEdit && finding.fixAction && (
                         <button
                           type="button"
                           onClick={() =>

@@ -3,7 +3,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { WorkspaceError } from './errors';
 
 export const RECEPT_APPLICATION_ID = 0x52435054;
-export const RECEPT_SCHEMA_VERSIONS = [1, 2, 3, 4];
+export const RECEPT_SCHEMA_VERSIONS = [1, 2, 3, 4, 5];
 
 export const databaseFileSuffixes = ['', '-journal', '-wal', '-shm'];
 

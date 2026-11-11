@@ -13,6 +13,7 @@ import { WorkspaceError } from './errors';
 import { officialMasters } from './officialMasters';
 import { clinicalMasters } from './clinicalMasters';
 import { protectedDatabasePath, RECEPT_APPLICATION_ID, RECEPT_SCHEMA_VERSIONS } from './databaseFiles';
+import { staffAccounts } from './staffAccounts';
 import { claimRecords } from './claimRecords';
 import type { ClaimRecord } from '../src/types/claimRecord';
 import { appendAccessAudit, type AuditAccess } from './accessAudit';
@@ -220,7 +221,8 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       }
       if (version === 1) db.exec(readFileSync(new URL('../database/002-official-masters.sql', import.meta.url), 'utf8'));
       if (version === 1 || version === 2) db.exec(readFileSync(new URL('../database/003-access-audit.sql', import.meta.url), 'utf8'));
-      if (version !== 4) db.exec(readFileSync(new URL('../database/004-claim-records.sql', import.meta.url), 'utf8'));
+      if (version < 4) db.exec(readFileSync(new URL('../database/004-claim-records.sql', import.meta.url), 'utf8'));
+      if (version < 5) db.exec(readFileSync(new URL('../database/005-staff.sql', import.meta.url), 'utf8'));
       if (db.prepare('SELECT seeded FROM workspace WHERE id = 1').get()?.seeded) return;
       replacePatients(db, INITIAL_PATIENTS);
       db.exec('UPDATE workspace SET seeded = 1 WHERE id = 1');
@@ -242,6 +244,7 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
   const masters = officialMasters(db, (work) => transaction(db, work, true));
   return {
     close: () => db.close(),
+    accounts: staffAccounts(db),
     clinical,
     masters,
     read: (access?: AuditAccess) => transaction(db, () => {
@@ -323,7 +326,7 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       masters.import(file, bytes, ({ entry, duplicate }) => {
         appendAccessAudit(db, access, { status: 200, masterImportId: entry.id, duplicate });
       }),
-    recordFailure: (access: AuditAccess, status: number) =>
+    recordAccess: (access: AuditAccess, status: number) =>
       transaction(db, () => appendAccessAudit(db, access, { status }), true),
   };
 }

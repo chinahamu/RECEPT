@@ -82,6 +82,7 @@ function inspectSnapshot(path: string) {
     if (databaseSchemaVersion >= 2) tables.push('master_imports', 'master_rows');
     if (databaseSchemaVersion >= 3) tables.push('access_audit');
     if (databaseSchemaVersion >= 4) tables.push('claim_records', 'claim_draft_editor');
+    if (databaseSchemaVersion >= 5) tables.push('staff_accounts');
     const exists = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?");
     if (tables.some((name) => !exists.get(name)) || !db.prepare('SELECT revision FROM workspace WHERE id = 1').get()) {
       throw new Error('RECEPTの必須テーブルまたは作業領域が見つかりません。');
