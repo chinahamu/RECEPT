@@ -4,6 +4,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import type { ClaimConfirmation, ClaimRecord } from './types/claimRecord';
 import type { PatientRecord } from './types/receipt';
 import type { ClaimPreview, Workspace, WorkspaceAction, WorkspaceResult } from './types/workspace';
 import { CLINIC_FACILITY_INFO, DEMO_MONTH } from './data/demoWorkspace';
@@ -13,10 +14,12 @@ import { EncounterWorkstation } from './components/EncounterWorkstation';
 import { BatchAuditConsole } from './components/BatchAuditConsole';
 import { PatientRegistryView } from './components/PatientRegistryView';
 import { LocalServerMasterView } from './components/LocalServerMasterView';
+import { ClaimRecordDialog } from './components/ClaimRecordDialog';
+import { ClaimRecordsView } from './components/ClaimRecordsView';
 import { ClaimCsvModal } from './components/ClaimCsvModal';
 import { HardDrive, Wifi, WifiOff } from 'lucide-react';
 
-type ActiveTab = 'workstation' | 'audit' | 'patients' | 'server';
+type ActiveTab = 'workstation' | 'audit' | 'patients' | 'claims' | 'server';
 
 const API = '/api/workspace';
 export default function App() {
@@ -25,6 +28,8 @@ export default function App() {
   const [storageError, setStorageError] = useState('');
   const [selectedPatientId, setSelectedPatientId] = useState('');
   const [claim, setClaim] = useState<ClaimPreview>();
+  const [confirmation, setConfirmation] = useState<ClaimConfirmation>();
+  const [claimRecord, setClaimRecord] = useState<ClaimRecord>();
   const pending = useRef(false);
   const [busy, setBusy] = useState(false);
 
@@ -50,6 +55,7 @@ export default function App() {
         try {
           setWorkspace(await requestJson<Workspace>(API));
           setClaim(undefined);
+          setConfirmation(undefined);
         } catch {
           // Keep the conflict message and allow a manual reload.
         }
@@ -60,10 +66,10 @@ export default function App() {
     }
   }
 
-  function mutate(action: WorkspaceAction) {
+  function mutate(action: WorkspaceAction, expectedRevision?: number) {
     if (!workspace) return;
     return run(async () => {
-      const result = await requestJson<WorkspaceResult>(API, { revision: workspace.revision, action });
+      const result = await requestJson<WorkspaceResult>(API, { revision: expectedRevision ?? workspace.revision, action });
       setWorkspace(result.workspace);
       return result;
     });
@@ -82,7 +88,7 @@ export default function App() {
   }
 
   async function handleResetDemoData() {
-    if (window.confirm('登録・編集したデモデータを消去して初期状態に戻しますか？') &&
+    if (window.confirm('編集中のデモデータを消去して初期状態に戻しますか？確定済みの請求記録は保存されます。') &&
         await mutate({ type: 'reset' })) {
       setSelectedPatientId('');
     }
@@ -91,6 +97,28 @@ export default function App() {
   async function openClaim() {
     const preview = await run(() => requestJson<ClaimPreview>('/api/claim-preview'));
     if (preview) setClaim(preview);
+  }
+
+  async function reviewClaim(patientId: string) {
+    const query = new URLSearchParams({ patientId });
+    const preview = await run(() => requestJson<ClaimConfirmation>(`/api/claim-records?${query}`));
+    if (preview) setConfirmation(preview);
+  }
+
+  async function openClaimRecord(id: string) {
+    const query = new URLSearchParams({ id });
+    const record = await run(() => requestJson<ClaimRecord>(`/api/claim-records?${query}`));
+    if (record) setClaimRecord(record);
+  }
+
+  async function confirmClaim(preview: ClaimConfirmation, correctionReason?: string) {
+    const result = await mutate({
+      type: 'finalize', patientId: preview.snapshot.patient.id, reviewHash: preview.reviewHash, correctionReason,
+    }, preview.revision);
+    if (result?.claimRecord) {
+      setConfirmation(undefined);
+      setClaimRecord(result.claimRecord);
+    }
   }
 
   if (!workspace) {
@@ -174,6 +202,15 @@ export default function App() {
             }`}
           >
             患者台帳
+          </a>
+          <a
+            href="#claims"
+            onClick={(e) => { e.preventDefault(); setActiveTab('claims'); }}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+              activeTab === 'claims' ? 'border-slate-900 text-slate-900 font-semibold' : 'border-transparent hover:text-slate-900'
+            }`}
+          >
+            請求確定記録
           </a>
           <a
             href="#server"
@@ -272,7 +309,7 @@ export default function App() {
             selectedPatientId={selectedPatientId}
             onSelectPatient={setSelectedPatientId}
             onUpdatePatient={handleUpdatePatient}
-            onFinalize={async (patientId) => Boolean(await mutate({ type: 'finalize', patientId }))}
+            onReviewClaim={reviewClaim}
             onApplyAutoFix={(patientId, findingId) => mutate({ type: 'fix', patientId, findingId })}
             isOfflineMode={isOfflineMode}
           />
@@ -302,6 +339,7 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'claims' && <ClaimRecordsView onOpen={openClaimRecord} busy={busy} />}
         {activeTab === 'server' && (
           <LocalServerMasterView
             activity={activity}
@@ -326,11 +364,20 @@ export default function App() {
         </div>
       </footer>
 
+      {confirmation && <ClaimRecordDialog confirmation={confirmation}
+        onConfirm={(reason) => confirmClaim(confirmation, reason)} busy={busy} error={storageError}
+        onClose={() => setConfirmation(undefined)} />}
+      {claimRecord && <ClaimRecordDialog record={claimRecord} busy={busy} error={storageError}
+        onClose={() => setClaimRecord(undefined)} />}
       {claim && (
         <ClaimCsvModal
           claim={claim}
           onClose={() => setClaim(undefined)}
-          onExport={async () => (await mutate({ type: 'exportCsv' }))?.claim}
+          onExport={async () => {
+            const output = (await mutate({ type: 'exportCsv' }, claim.revision))?.claim;
+            if (output) setClaim(output);
+            return output;
+          }}
           busy={busy}
           error={storageError}
         />

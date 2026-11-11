@@ -62,7 +62,11 @@ export const requestSchema = z.object({
   action: z.discriminatedUnion('type', [
     z.object({ type: z.literal('register'), patient }),
     z.object({ type: z.literal('update'), patientId: id, diagnoses, billingItems, summary: z.string().min(1).max(2500) }),
-    z.object({ type: z.literal('finalize'), patientId: id }),
+    z.object({
+      type: z.literal('finalize'), patientId: id,
+      reviewHash: z.string().regex(/^[0-9a-f]{64}$/),
+      correctionReason: z.string().trim().min(1).max(1000).optional(),
+    }),
     z.object({ type: z.literal('fix'), patientId: id, findingId: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/) }),
     z.object({ type: z.literal(['batchFix', 'toggleOffline', 'reset', 'exportCsv', 'snapshot']) }),
   ]),

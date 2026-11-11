@@ -26,7 +26,7 @@ interface EncounterWorkstationProps {
   onSelectPatient: (id: string) => void;
   onUpdatePatient: (updated: PatientRecord, logSummary: string) => Promise<boolean>;
   onApplyAutoFix: (patientId: string, findingId: string) => void;
-  onFinalize: (patientId: string) => Promise<boolean>;
+  onReviewClaim: (patientId: string) => void;
   isOfflineMode: boolean;
 }
 
@@ -36,7 +36,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
   onSelectPatient,
   onUpdatePatient,
   onApplyAutoFix,
-  onFinalize,
+  onReviewClaim,
   isOfflineMode,
 }) => {
   const [patientQuery, setPatientQuery] = useState('');
@@ -49,7 +49,6 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
   const [newDiagSuspected, setNewDiagSuspected] = useState(false);
   const [editingCommentItemId, setEditingCommentItemId] = useState<string | null>(null);
   const [commentInputText, setCommentInputText] = useState<string>('');
-  const [finalizeBanner, setFinalizeBanner] = useState<string | null>(null);
 
   const selectedPatient = useMemo(
     () => patients.find((p) => p.id === selectedPatientId) || patients[0],
@@ -182,14 +181,6 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
     if (!await onUpdatePatient(nextPatient, `摘要コメント記載: ${commentInputText.trim()}`)) return;
     setEditingCommentItemId(null);
     setCommentInputText('');
-  };
-
-  const handleFinalizeAccounting = async () => {
-    if (!await onFinalize(selectedPatient.id)) return;
-    setFinalizeBanner(
-      `${selectedPatient.name} 様の診療会計（総点数 ${calculation.totalPoints.toLocaleString()}点・窓口負担金 ${calculation.copayRoundedYen.toLocaleString()}円）をSQLiteに保存しました。`
-    );
-    setTimeout(() => setFinalizeBanner(null), 5000);
   };
 
   return (
@@ -351,15 +342,6 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
             </div>
           </div>
 
-          {finalizeBanner && (
-            <div
-              role="status"
-              className="mt-3 p-2.5 bg-emerald-50 border border-emerald-200 rounded-md text-xs text-emerald-900 flex items-center gap-2"
-            >
-              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span>{finalizeBanner}</span>
-            </div>
-          )}
 
           {/* Registered Diagnoses Section */}
           <div className="mt-4">
@@ -746,11 +728,11 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
 
           <button
             type="button"
-            onClick={handleFinalizeAccounting}
+            onClick={() => onReviewClaim(selectedPatient.id)}
             className="mt-3 w-full py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-md transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
           >
             <FileCheck2 className="w-4 h-4 shrink-0" />
-            <span>デモ会計を確定して保存</span>
+            <span>請求記録の確定内容を確認</span>
           </button>
         </div>
 

@@ -64,14 +64,15 @@ export function createWorkspaceApi(
     },
     middleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
       const path = req.url?.split('?')[0];
-      if (path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview') return next();
+      if (path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview' &&
+          path !== '/api/claim-records') return next();
 
       const access: AuditAccess = {
         requestId: randomUUID(),
         requestedAt: new Date().toISOString(),
         actor: { kind: 'anonymous' },
         resource: path === '/api/official-masters' ? 'official-masters'
-          : path === '/api/workspace' ? 'workspace' : 'claim-preview',
+          : path === '/api/workspace' ? 'workspace' : path === '/api/claim-records' ? 'claim-records' : 'claim-preview',
         operation: req.method === 'GET' ? 'read' : req.method === 'POST' ? 'write' : 'unsupported-method',
       };
 
@@ -113,6 +114,30 @@ export function createWorkspaceApi(
           } else {
             res.setHeader('Allow', 'GET, POST');
             throw new WorkspaceError(405, '未対応の操作です。');
+          }
+        } else if (access.resource === 'claim-records' && req.method === 'GET') {
+          const params = new URLSearchParams(req.url?.split('?')[1]);
+          const patientId = params.get('patientId');
+          const id = params.get('id');
+          const query = (params.get('q') ?? '').trim();
+          const before = params.get('before');
+          const validId = /^[A-Za-z0-9_-]{1,100}$/;
+          if ((patientId !== null && !validId.test(patientId)) || (id !== null && !validId.test(id)) ||
+              (patientId !== null && id !== null) || query.length > 100 ||
+              (before !== null && (!/^\d+$/.test(before) || !Number.isSafeInteger(Number(before)) || Number(before) < 1)) ||
+              ((patientId !== null || id !== null) && (query || before !== null))) {
+            throw new WorkspaceError(400, '請求記録の照会条件が正しくありません。');
+          }
+          store ??= open();
+          if (patientId) {
+            access.operation = 'review-claim-draft';
+            sendJson(res, 200, store.previewConfirmation(patientId, access));
+          } else if (id) {
+            access.operation = 'read-claim-record';
+            sendJson(res, 200, store.readClaimRecord(id, access));
+          } else {
+            access.operation = 'list-claim-records';
+            sendJson(res, 200, store.listClaimRecords(query, before === null ? null : Number(before), access));
           }
         } else if (req.method === 'GET') {
           store ??= open();
