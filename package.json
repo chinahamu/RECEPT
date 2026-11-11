@@ -11,11 +11,12 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test src/utils/receiptEngine.test.ts server/workspace.test.ts",
+    "test": "node --import tsx --test src/utils/receiptEngine.test.ts server/workspace.test.ts integration/recept-v1/contract.test.mjs",
     "db:init": "python3 database/init.py",
     "audit": "node --import tsx server/reviewAccessAudit.ts",
     "db:backup": "node --import tsx server/backupCli.ts",
-    "staff": "node --import tsx server/staffCli.ts"
+    "staff": "node --import tsx server/staffCli.ts",
+    "test:integration": "node --test integration/recept-v1/contract.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.546.0",
@@ -29,6 +30,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "ajv": "8.18.0",
     "tailwindcss": "^4.1.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.0",
