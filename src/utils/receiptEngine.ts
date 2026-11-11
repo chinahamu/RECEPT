@@ -26,6 +26,25 @@ export const CATEGORY_LABELS: Record<typeBillingCategoryCode, string> = {
   '80': 'その他',
 };
 
+export function referenceDateForMonth(month: string, endOfMonth = false) {
+  if (!endOfMonth && month === DEMO_MONTH) return DEMO_DATE;
+  const [year, number] = month.split('-').map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return `${month}-${days[number - 1]}`;
+}
+
+export function patientForMonth(patient: PatientRecord, month: string): PatientRecord {
+  const diagnoses = patient.diagnoses.filter(({ startDate, dencalMonths }) =>
+    startDate.slice(0, 7) <= month && (!dencalMonths || dencalMonths.includes(month)));
+  const billingItems = patient.billingItems.filter(({ date }) => date.slice(0, 7) === month);
+  const serviceDays = new Set(billingItems.map(({ date }) => date));
+  const visitCountThisMonth = month === DEMO_MONTH
+    ? Math.max(patient.visitCountThisMonth, serviceDays.size)
+    : serviceDays.size;
+  return { ...patient, diagnoses, billingItems, visitCountThisMonth };
+}
+
 /**
  * 1明細行あたりの算定点数計算
  */
@@ -196,6 +215,12 @@ export function runMhlwReceiptCheck(
     }
   }
 
+  const sourceIds = new Set([...patient.diagnoses, ...patient.billingItems]
+    .filter(({ dencalSource }) => dencalSource).map(({ id }) => id));
+  for (const finding of findings) {
+    const target = finding.fixAction?.targetItemId ?? finding.fixAction?.diagnosisId;
+    if (target && sourceIds.has(target)) delete finding.fixAction;
+  }
   return findings;
 }
 
@@ -324,7 +349,7 @@ export function generateDemoClaimCsv(
     // SY: 傷病名レコード
     pt.diagnoses.forEach((diag) => {
       const outcomeCode =
-        diag.outcome === '継続' ? '1' : diag.outcome === '治癒' ? '2' : diag.outcome === '中止' ? '4' : '1';
+        diag.outcome === '不明' ? '' : diag.outcome === '継続' ? '1' : diag.outcome === '治癒' ? '2' : diag.outcome === '中止' ? '4' : '1';
       lines.push(
         [
           'SY',

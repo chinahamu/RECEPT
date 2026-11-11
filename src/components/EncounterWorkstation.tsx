@@ -16,11 +16,13 @@ import {
   PatientDiagnosis,
   PatientRecord,
 } from '../types/receipt';
-import { DEMO_DATE } from '../data/demoWorkspace';
+import { DEMO_DATE, DEMO_MONTH } from '../data/demoWorkspace';
+import { referenceDateForMonth } from '../utils/receiptEngine';
 import { useClinicalMasterSearch } from '../utils/clinicalMasterSearch';
 import type { PatientView } from '../types/workspace';
 
 interface EncounterWorkstationProps {
+  month: string;
   patients: PatientView[];
   selectedPatientId: string;
   onSelectPatient: (id: string) => void;
@@ -33,6 +35,7 @@ interface EncounterWorkstationProps {
 
 export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
   patients,
+  month,
   selectedPatientId,
   onSelectPatient,
   onUpdatePatient,
@@ -41,12 +44,13 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
   canEdit,
   isOfflineMode,
 }) => {
+  const [entryDate, setEntryDate] = useState(month === DEMO_MONTH ? DEMO_DATE : `${month}-01`);
   const [patientQuery, setPatientQuery] = useState('');
   const [procedureQuery, setProcedureQuery] = useState('');
   const [diseaseQuery, setDiseaseQuery] = useState('');
   const [selectedDiseaseCodeToAdd, setSelectedDiseaseCodeToAdd] = useState('');
-  const { entries: diseases, error: diseaseError } = useClinicalMasterSearch('b', diseaseQuery);
-  const { entries: filteredProcedures, error: procedureError } = useClinicalMasterSearch('s', procedureQuery);
+  const { entries: diseases, error: diseaseError } = useClinicalMasterSearch('b', diseaseQuery, entryDate);
+  const { entries: filteredProcedures, error: procedureError } = useClinicalMasterSearch('s', procedureQuery, entryDate);
   const selectedDisease = diseases.find((entry) => entry.code === selectedDiseaseCodeToAdd);
   const [newDiagSuspected, setNewDiagSuspected] = useState(false);
   const [editingCommentItemId, setEditingCommentItemId] = useState<string | null>(null);
@@ -84,7 +88,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
       diseaseCode: master.code,
       diseaseName: master.name,
       icd10: master.icd10,
-      startDate: DEMO_DATE,
+      startDate: entryDate,
       outcome: '継続',
       isMain: selectedPatient.diagnoses.length === 0,
       isSuspected: newDiagSuspected,
@@ -103,7 +107,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
     setNewDiagSuspected(false);
   };
 
-  const handleToggleDiagnosisOutcome = (diagId: string, nextOutcome: '継続' | '治癒' | '中止') => {
+  const handleToggleDiagnosisOutcome = (diagId: string, nextOutcome: Exclude<PatientDiagnosis['outcome'], '不明'>) => {
     const nextDiagnoses = selectedPatient.diagnoses.map((d) =>
       d.id === diagId ? { ...d, outcome: nextOutcome } : d
     );
@@ -132,7 +136,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
       quantity: 1,
       days: 1,
       unit: master.unit,
-      date: DEMO_DATE,
+      date: entryDate,
     };
 
     const nextItems = [...selectedPatient.billingItems, newItem];
@@ -323,6 +327,13 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                 <span aria-hidden="true">·</span>
                 <span>性別: {selectedPatient.sex}</span>
                 <span aria-hidden="true">·</span>
+                {canEdit && <label className="flex items-center gap-1">手入力の日付
+                  <input type="date" value={entryDate} min={`${month}-01`} max={referenceDateForMonth(month, true)}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      if (value.startsWith(`${month}-`)) setEntryDate(value);
+                    }} className="rounded border border-slate-300 bg-white px-1" />
+                </label>}
                 <span>当月来院: <strong className="font-mono tabular-nums font-medium">{selectedPatient.visitCountThisMonth}</strong>回目</span>
               </div>
             </div>
@@ -383,6 +394,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             {diag.isSuspected && (
                               <span className="text-amber-700 font-normal">（疑い）</span>
                             )}
+                            {diag.dencalSource && <span className="text-xs text-slate-500">DENCAL</span>}
                             {diag.isMain && (
                               <span className="text-slate-500 font-normal">· 主病</span>
                             )}
@@ -399,13 +411,13 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                         </td>
                         <td className="py-2 px-2">
                           <select
-                            disabled={!canEdit}
+                            disabled={!canEdit || Boolean(diag.dencalSource)}
                             aria-label={`${diag.diseaseName}の転帰`}
                             value={diag.outcome}
                             onChange={(e) =>
                               handleToggleDiagnosisOutcome(
                                 diag.id,
-                                e.target.value as '継続' | '治癒' | '中止'
+                                e.target.value as Exclude<PatientDiagnosis['outcome'], '不明'>
                               )
                             }
                             className="bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 focus:outline-none focus:border-slate-900"
@@ -413,12 +425,14 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             <option value="継続">継続</option>
                             <option value="治癒">治癒</option>
                             <option value="中止">中止</option>
+                            <option value="移行">移行</option>
+                            {diag.dencalSource && <option value="不明">不明</option>}
                           </select>
                         </td>
                         <td className="py-2 px-2 text-right">
                           <button
                             type="button"
-                            disabled={!canEdit}
+                            disabled={!canEdit || Boolean(diag.dencalSource)}
                             onClick={() => handleRemoveDiagnosis(diag.id, diag.diseaseName)}
                             aria-label={`傷病名「${diag.diseaseName}」を削除`}
                             className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
@@ -519,14 +533,14 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                       <td className="py-2.5 px-2.5">
                         <div className="font-medium text-slate-900">{item.name}</div>
                         <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                          コード: {item.code}
+                          コード {item.code} · {item.date}{item.dencalSource && ' · DENCAL'}
                         </div>
                         {item.commentText && (
                           <div className="mt-1 text-[11px] text-emerald-800 bg-emerald-50/80 px-2 py-0.5 rounded border border-emerald-200">
                             摘要コメント [{item.commentCode}]: {item.commentText}
                           </div>
                         )}
-                        {editingCommentItemId === item.id ? (
+                        {!item.dencalSource && (editingCommentItemId === item.id ? (
                           <div className="mt-1.5 flex items-center gap-1.5">
                             <input
                               type="text"
@@ -558,7 +572,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             <MessageSquarePlus className="w-3 h-3" />
                             <span>{item.commentText ? 'コメント編集' : '摘要コメント追加'}</span>
                           </button>
-                        )}
+                        ))}
                       </td>
                       <td className="py-2.5 px-2 text-right font-mono tabular-nums text-slate-700 whitespace-nowrap">
                         {item.points}点
@@ -569,7 +583,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             type="number"
                             min={1}
                             max={90}
-                            disabled={!canEdit}
+                            disabled={!canEdit || Boolean(item.dencalSource)}
                             aria-label={`${item.name}の数量`}
                             key={item.quantity}
                             defaultValue={item.quantity}
@@ -582,7 +596,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             type="number"
                             min={1}
                             max={90}
-                            disabled={!canEdit}
+                            disabled={!canEdit || Boolean(item.dencalSource)}
                             aria-label={`${item.name}の日数または回数`}
                             key={item.days}
                             defaultValue={item.days}
@@ -601,7 +615,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                       <td className="py-2.5 px-2 text-right">
                         <button
                           type="button"
-                          disabled={!canEdit}
+                          disabled={!canEdit || Boolean(item.dencalSource)}
                           onClick={() => handleRemoveBillingItem(item.id, item.name)}
                           aria-label={`算定項目「${item.name}」を削除`}
                           className="p-1 text-slate-400 hover:text-rose-600 transition-colors"

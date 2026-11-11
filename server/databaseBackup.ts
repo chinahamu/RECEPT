@@ -85,6 +85,7 @@ function inspectSnapshot(path: string) {
     if (databaseSchemaVersion >= 4) tables.push('claim_records', 'claim_draft_editor');
     if (databaseSchemaVersion >= 5) tables.push('staff_accounts');
     if (databaseSchemaVersion >= 6) tables.push('dencal_inbox', 'dencal_patient_matches');
+    if (databaseSchemaVersion >= 7) tables.push('dencal_draft_applications', 'claim_month_editor');
     const exists = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?");
     if (tables.some((name) => !exists.get(name)) || !db.prepare('SELECT revision FROM workspace WHERE id = 1').get()) {
       throw new Error('RECEPTの必須テーブルまたは作業領域が見つかりません。');

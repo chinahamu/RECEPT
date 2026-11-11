@@ -20,7 +20,7 @@ function main(args: string[]) {
   try {
     db.exec('PRAGMA busy_timeout = 3000');
     if (db.prepare('PRAGMA application_id').get()?.application_id !== 0x52435054 ||
-        ![3, 4, 5, 6].includes(Number(db.prepare('PRAGMA user_version').get()?.user_version))) {
+        ![3, 4, 5, 6, 7].includes(Number(db.prepare('PRAGMA user_version').get()?.user_version))) {
       throw new Error('RECEPTの監査ログ対応DBを指定してください。');
     }
     if (mode === 'verify') {

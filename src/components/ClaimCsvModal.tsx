@@ -32,7 +32,7 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'recept-demo-claims.csv';
+    a.download = `recept-demo-claims-${output.month}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -48,7 +48,7 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
         <div className="flex items-center justify-between border-b border-slate-200 pb-3">
           <div>
             <h2 id="claim-csv-title" className="text-base font-bold text-slate-900">
-              デモ請求CSV 出力プレビュー
+              {claim.month} デモ請求CSV 出力プレビュー
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
               確定済みの最新版を出力します。架空データ専用で、保険請求には使用できません。

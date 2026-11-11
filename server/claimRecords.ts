@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { CLINIC_FACILITY_INFO, DEMO_DATE, DEMO_MONTH } from '../src/data/demoWorkspace';
+import { CLINIC_FACILITY_INFO, DEMO_MONTH } from '../src/data/demoWorkspace';
 import type { MasterImport } from '../src/data/officialMasters';
 import type {
   ClaimActor, ClaimConfirmation, ClaimEditor, ClaimRecord, ClaimRecordPage, ClaimRecordSummary, ClaimSnapshot,
 } from '../src/types/claimRecord';
 import type { PatientRecord } from '../src/types/receipt';
-import { calculateLineItemPoints, calculateReceiptPointsAndCopay, runMhlwReceiptCheck } from '../src/utils/receiptEngine';
+import { calculateLineItemPoints, calculateReceiptPointsAndCopay, patientForMonth, referenceDateForMonth, runMhlwReceiptCheck } from '../src/utils/receiptEngine';
 import { WorkspaceError } from './errors';
 
 type RecordBody = Pick<ClaimRecord, 'confirmedAt' | 'correctionReason' | 'enteredBy' | 'confirmedBy' | 'snapshot'>;
@@ -60,13 +60,9 @@ export function verifyClaimRecords(db: DatabaseSync) {
   return count;
 }
 
-function snapshotFor(db: DatabaseSync, source: PatientRecord): ClaimSnapshot {
-  const { notes: _notes, ...profile } = source;
-  const patient = {
-    ...profile,
-    diagnoses: profile.diagnoses.filter(({ startDate }) => startDate.slice(0, 7) <= DEMO_MONTH),
-    billingItems: profile.billingItems.filter(({ date }) => date.slice(0, 7) === DEMO_MONTH),
-  };
+function snapshotFor(db: DatabaseSync, source: PatientRecord, month: string): ClaimSnapshot {
+  const { notes: _notes, ...patient } = patientForMonth(source, month);
+  patient.diagnoses = patient.diagnoses.map(({ dencalMonths: _months, ...diagnosis }) => diagnosis);
   const ids = new Set([...patient.diagnoses, ...patient.billingItems].flatMap(({ masterImportId }) =>
     masterImportId === undefined ? [] : [masterImportId]));
   const lookup = db.prepare(`SELECT id, kind, filename, published_on AS publishedOn, imported_at AS importedAt,
@@ -76,12 +72,12 @@ function snapshotFor(db: DatabaseSync, source: PatientRecord): ClaimSnapshot {
     if (!entry) throw new WorkspaceError(500, '確定対象の公式マスターの版を確認できません。');
     return entry as unknown as MasterImport;
   });
-  const findings = runMhlwReceiptCheck(patient, DEMO_DATE);
+  const findings = runMhlwReceiptCheck(patient, referenceDateForMonth(month));
   patient.auditStatus = findings.some(({ severity }) => severity !== 'opportunity') ? '要確認' : '点検済・適正';
   return {
     schemaVersion: 1,
     ruleVersion: 'recept-demo-v1',
-    month: DEMO_MONTH,
+    month,
     facility: {
       facilityCode: CLINIC_FACILITY_INFO.facilityCode,
       facilityName: CLINIC_FACILITY_INFO.facilityName,
@@ -97,11 +93,11 @@ function snapshotFor(db: DatabaseSync, source: PatientRecord): ClaimSnapshot {
 }
 
 export function claimRecords(db: DatabaseSync) {
-  function preview(patient: PatientRecord, revision: number): ClaimConfirmation {
+  function preview(patient: PatientRecord, revision: number, month = DEMO_MONTH): ClaimConfirmation {
     const row = db.prepare(`SELECT ${columns}, body, sha256 FROM claim_records
-      WHERE patient_id = ? AND month = ? ORDER BY version DESC LIMIT 1`).get(patient.id, DEMO_MONTH);
+      WHERE patient_id = ? AND month = ? ORDER BY version DESC LIMIT 1`).get(patient.id, month);
     const previous = row ? decode(row as RecordRow) : null;
-    const snapshot = snapshotFor(db, patient);
+    const snapshot = snapshotFor(db, patient, month);
     const reviewHash = hash(JSON.stringify(snapshot));
     return {
       revision, snapshot, reviewHash,
@@ -112,19 +108,20 @@ export function claimRecords(db: DatabaseSync) {
 
   return {
     preview,
-    noteEdit(patientIds: string[], editor: ClaimEditor) {
-      const save = db.prepare(`INSERT INTO claim_draft_editor (patient_id, editor) VALUES (?, ?)
-        ON CONFLICT (patient_id) DO UPDATE SET editor = excluded.editor`);
-      for (const id of patientIds) save.run(id, JSON.stringify(editor));
+    noteEdit(patientIds: string[], editor: ClaimEditor, month = DEMO_MONTH) {
+      const save = db.prepare(`INSERT INTO claim_month_editor (patient_id, month, editor) VALUES (?, ?, ?)
+        ON CONFLICT (patient_id, month) DO UPDATE SET editor = excluded.editor`);
+      for (const id of patientIds) save.run(id, month, JSON.stringify(editor));
     },
-    finalize(patient: PatientRecord, revision: number, reviewHash: string, reason?: string, actor = anonymous) {
-      const reviewed = preview(patient, revision);
+    finalize(patient: PatientRecord, revision: number, reviewHash: string, reason?: string, actor = anonymous, month = DEMO_MONTH) {
+      const reviewed = preview(patient, revision, month);
       if (reviewHash !== reviewed.reviewHash) throw new WorkspaceError(409, '確認時から内容が変わりました。内容を確認し直してください。');
       if (!reviewed.hasChanges) throw new WorkspaceError(409, '確定済みの記録から変更がありません。');
       if (Boolean(reviewed.previous) !== Boolean(reason)) {
         throw new WorkspaceError(400, reviewed.previous ? '訂正理由を入力してください。' : '初回確定に訂正理由は指定できません。');
       }
-      const editor = db.prepare('SELECT editor FROM claim_draft_editor WHERE patient_id = ?').get(patient.id);
+      const editor = db.prepare('SELECT editor FROM claim_month_editor WHERE patient_id = ? AND month = ?').get(patient.id, month)
+        ?? (month === DEMO_MONTH ? db.prepare('SELECT editor FROM claim_draft_editor WHERE patient_id = ?').get(patient.id) : undefined);
       const body: RecordBody = {
         confirmedAt: new Date().toISOString(),
         confirmedBy: actor,
@@ -135,7 +132,7 @@ export function claimRecords(db: DatabaseSync) {
       const row = {
         seq: Number(db.prepare('SELECT coalesce(max(seq), 0) + 1 AS seq FROM claim_records').get()?.seq),
         id: randomUUID(), patient_id: patient.id, chart_number: patient.chartNumber, patient_name: patient.name,
-        month: DEMO_MONTH, version: (reviewed.previous?.version ?? 0) + 1,
+        month, version: (reviewed.previous?.version ?? 0) + 1,
         previous_id: reviewed.previous?.id ?? null, body: JSON.stringify(body),
       };
       const sha256 = recordHash(row);
@@ -149,22 +146,22 @@ export function claimRecords(db: DatabaseSync) {
       if (!row) throw new WorkspaceError(404, '確定記録が見つかりません。');
       return decode(row as RecordRow);
     },
-    list(query: string, before: number | null): ClaimRecordPage {
+    list(query: string, before: number | null, month: string | null): ClaimRecordPage {
       const limit = 30;
       const rows = db.prepare(`SELECT ${columns}, json_extract(body, '$.confirmedAt') AS confirmedAt
         FROM claim_records
-        WHERE (? IS NULL OR seq < ?)
+        WHERE (? IS NULL OR seq < ?) AND (? IS NULL OR month = ?)
           AND (instr(chart_number, ?) > 0 OR instr(patient_name, ?) > 0)
-        ORDER BY seq DESC LIMIT ?`).all(before, before, query, query, limit + 1) as
+        ORDER BY seq DESC LIMIT ?`).all(before, before, month, month, query, query, limit + 1) as
         (Omit<RecordRow, 'body' | 'sha256'> & Pick<RecordBody, 'confirmedAt'>)[];
       const page = rows.slice(0, limit);
       return { records: page.map((row) => summary(row, row.confirmedAt)), nextBefore: rows.length > limit ? page[limit - 1].seq : null };
     },
-    latestForExport() {
+    latestForExport(month = DEMO_MONTH) {
       return (db.prepare(`SELECT ${columns}, body, sha256 FROM claim_records AS current
         WHERE month = ? AND NOT EXISTS (SELECT 1 FROM claim_records
           WHERE patient_id = current.patient_id AND month = current.month AND version > current.version)
-        ORDER BY patient_id`).all(DEMO_MONTH) as RecordRow[]).map(decode);
+        ORDER BY patient_id`).all(month) as RecordRow[]).map(decode);
     },
   };
 }

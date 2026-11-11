@@ -58,10 +58,10 @@ export function clinicalMasters(db: DatabaseSync) {
       const entry = row && toEntry[kind](row, date.replaceAll('-', '')) as ClinicalMasterEntries[K] | undefined;
       return entry && row ? { ...entry, masterImportId: row.import_id } : undefined;
     },
-    search<K extends ClinicalKind>(kind: K, query: string) {
+    search<K extends ClinicalKind>(kind: K, query: string, date = DEMO_DATE) {
       const result: ClinicalMasterEntries[K][] = [];
-      for (const row of search.iterate(kind, DEMO_DATE, query, query)) {
-        const entry = toEntry[kind](row as StoredRow, DEMO_DATE.replaceAll('-', '')) as ClinicalMasterEntries[K] | undefined;
+      for (const row of search.iterate(kind, date, query, query)) {
+        const entry = toEntry[kind](row as StoredRow, date.replaceAll('-', '')) as ClinicalMasterEntries[K] | undefined;
         if (entry) result.push(entry);
         if (result.length === 50) break;
       }

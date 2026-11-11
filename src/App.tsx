@@ -4,12 +4,13 @@ import { DencalInboxView } from './components/DencalInboxView';
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { hasStaffRole, staffRoleLabels, type Staff } from './types/staff';
 import type { ClaimConfirmation, ClaimRecord } from './types/claimRecord';
 import type { PatientRecord } from './types/receipt';
 import type { ClaimPreview, Workspace, WorkspaceAction, WorkspaceResult } from './types/workspace';
 import { CLINIC_FACILITY_INFO, DEMO_MONTH } from './data/demoWorkspace';
+import { calculateReceiptPointsAndCopay, patientForMonth, referenceDateForMonth, runMhlwReceiptCheck } from './utils/receiptEngine';
 import { OFFICIAL_MASTERS, type MasterKind } from './data/officialMasters';
 import { ApiError, requestJson, sessionExpiredEvent, setDisplayedSession } from './utils/workspaceApi';
 import { EncounterWorkstation } from './components/EncounterWorkstation';
@@ -113,6 +114,12 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
   const canManage = hasStaffRole(staff, 'admin');
   const [activeTab, setActiveTab] = useState<ActiveTab>('workstation');
   const [workspace, setWorkspace] = useState<Workspace>();
+  const [month, setMonth] = useState(DEMO_MONTH);
+  const monthlyPatients = useMemo(() => workspace?.patients.map((patient) => {
+    const draft = patientForMonth(patient, month);
+    const findings = runMhlwReceiptCheck(draft, referenceDateForMonth(month));
+    return { ...draft, findings, linePoints: patient.linePoints, calculation: calculateReceiptPointsAndCopay(draft) };
+  }) ?? [], [workspace, month]);
   const [storageError, setStorageError] = useState('');
   const [selectedPatientId, setSelectedPatientId] = useState('');
   const [claim, setClaim] = useState<ClaimPreview>();
@@ -171,7 +178,9 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
 
   async function handleUpdatePatient(patient: PatientRecord, summary: string) {
     return Boolean(await mutate({
-      type: 'update', patientId: patient.id, diagnoses: patient.diagnoses, billingItems: patient.billingItems, summary,
+      type: 'update', patientId: patient.id, month, summary,
+      diagnoses: patient.diagnoses.filter(({ dencalSource }) => !dencalSource),
+      billingItems: patient.billingItems.filter(({ dencalSource }) => !dencalSource),
     }));
   }
 
@@ -183,12 +192,12 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
   }
 
   async function openClaim() {
-    const preview = await run(() => requestJson<ClaimPreview>('/api/claim-preview'));
+    const preview = await run(() => requestJson<ClaimPreview>(`/api/claim-preview?month=${month}`));
     if (preview) setClaim(preview);
   }
 
   async function reviewClaim(patientId: string) {
-    const query = new URLSearchParams({ patientId });
+    const query = new URLSearchParams({ patientId, month });
     const preview = await run(() => requestJson<ClaimConfirmation>(`/api/claim-records?${query}`));
     if (preview) setConfirmation(preview);
   }
@@ -207,7 +216,7 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
 
   async function confirmClaim(preview: ClaimConfirmation, correctionReason?: string) {
     const result = await mutate({
-      type: 'finalize', patientId: preview.snapshot.patient.id, reviewHash: preview.reviewHash, correctionReason,
+      type: 'finalize', month: preview.snapshot.month, patientId: preview.snapshot.patient.id, reviewHash: preview.reviewHash, correctionReason,
     }, preview.revision);
     if (result?.claimRecord) {
       setConfirmation(undefined);
@@ -411,25 +420,35 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
 
       {/* Main Content Viewport */}
       <main aria-busy={busy} className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-5">
+        {(activeTab === 'workstation' || activeTab === 'audit' || activeTab === 'claims') && (
+          <label className="mb-4 flex items-center gap-2 text-sm font-medium">診療月
+            <input type="month" required disabled={busy} value={month} onChange={(event) => {
+              if (/^\d{4}-(0[1-9]|1[0-2])$/.test(event.target.value)) setMonth(event.target.value);
+            }} className="rounded border border-slate-300 bg-white px-2 py-1" />
+          </label>
+        )}
         {activeTab === 'workstation' && (
           <EncounterWorkstation
-            patients={patients}
+            key={month}
+            month={month}
+            patients={monthlyPatients}
             selectedPatientId={selectedPatientId}
             onSelectPatient={setSelectedPatientId}
             onUpdatePatient={handleUpdatePatient}
             onReviewClaim={reviewClaim}
             canEdit={canEdit}
-            onApplyAutoFix={(patientId, findingId) => mutate({ type: 'fix', patientId, findingId })}
+            onApplyAutoFix={(patientId, findingId) => mutate({ type: 'fix', patientId, findingId, month })}
             isOfflineMode={isOfflineMode}
           />
         )}
 
         {activeTab === 'audit' && (
           <BatchAuditConsole
-            patients={patients}
-            onApplyAutoFix={(patientId, findingId) => mutate({ type: 'fix', patientId, findingId })}
+            month={month}
+            patients={monthlyPatients}
+            onApplyAutoFix={(patientId, findingId) => mutate({ type: 'fix', patientId, findingId, month })}
             canEdit={canEdit}
-            onBatchAutoFixAll={() => mutate({ type: 'batchFix' })}
+            onBatchAutoFixAll={() => mutate({ type: 'batchFix', month })}
             onOpenClaimCsv={dataExportsEnabled ? openClaim : undefined}
             onNavigateToWorkstation={(patientId) => {
               setSelectedPatientId(patientId);
@@ -449,9 +468,14 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
           />
         )}
 
-        {activeTab === 'dencal-inbox' && <DencalInboxView patients={patients}
+        {activeTab === 'dencal-inbox' && <DencalInboxView patients={patients} canEdit={canEdit}
+          openDraft={(patientId, month) => {
+            setSelectedPatientId(patientId);
+            setMonth(month);
+            setActiveTab('workstation');
+          }}
           refreshPatients={async () => { setWorkspace(await requestJson<Workspace>(API)); }} />}
-        {activeTab === 'claims' && canEdit && <ClaimRecordsView onOpen={openClaimRecord} busy={busy} />}
+        {activeTab === 'claims' && canEdit && <ClaimRecordsView key={month} month={month} onOpen={openClaimRecord} busy={busy} />}
         {activeTab === 'server' && canManage && (
           <LocalServerMasterView
             activity={activity}
@@ -475,7 +499,7 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
           レセプト — 架空データでの操作検証版
         </div>
         <div className="font-mono tabular-nums">
-          デモ診療月 {DEMO_MONTH} · SQLite保存
+          SQLite保存
         </div>
       </footer>
 
@@ -491,7 +515,7 @@ function WorkspaceApp({ staff, onLogout }: { staff: Staff; onLogout: () => Promi
           onClose={() => setClaim(undefined)}
           onExport={async (destination) => {
             if (!confirmDemoExport(destination === 'clipboard' ? 'クリップボードにコピー' : 'CSVファイルに保存')) return;
-            const output = (await mutate({ type: 'exportCsv' }, claim.revision))?.claim;
+            const output = (await mutate({ type: 'exportCsv', month: claim.month }, claim.revision))?.claim;
             if (output) setClaim(output);
             return output;
           }}

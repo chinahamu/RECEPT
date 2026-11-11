@@ -2,19 +2,30 @@ export type InsuranceCategory = '社保' | '国保' | '後期高齢者';
 export type CopayRatio = 0.1 | 0.2 | 0.3;
 export type typeBillingCategoryCode = '11' | '12' | '13' | '14' | '21' | '30' | '40' | '60' | '70' | '80';
 
+export interface DencalDraftSource {
+  facilityId: string;
+  senderId: string;
+  encounterId: string;
+  transferRevision: number;
+  sourceId: string;
+}
+
 export interface PatientDiagnosis {
+  dencalSource?: DencalDraftSource;
+  dencalMonths?: string[];
   id: string;
   masterImportId?: number;
   diseaseCode: string;
   diseaseName: string;
   icd10: string;
   startDate: string; // YYYY-MM-DD
-  outcome: '継続' | '治癒' | '中止' | '移行';
+  outcome: '継続' | '治癒' | '中止' | '移行' | '不明';
   isMain: boolean;
   isSuspected: boolean; // 疑い病名
 }
 
 export interface BillingLineItem {
+  dencalSource?: DencalDraftSource;
   id: string;
   masterImportId?: number;
   code: string;

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ClaimRecordPage } from '../types/claimRecord';
 import { requestJson } from '../utils/workspaceApi';
 
-export function ClaimRecordsView({ onOpen, busy }: { onOpen: (id: string) => void; busy: boolean }) {
+export function ClaimRecordsView({ month, onOpen, busy }: { month: string; onOpen: (id: string) => void; busy: boolean }) {
   const [input, setInput] = useState('');
   const [query, setQuery] = useState('');
   const [before, setBefore] = useState<number | null>(null);
@@ -11,14 +11,14 @@ export function ClaimRecordsView({ onOpen, busy }: { onOpen: (id: string) => voi
 
   useEffect(() => {
     let current = true;
-    const params = new URLSearchParams({ q: query });
+    const params = new URLSearchParams({ q: query, month });
     if (before !== null) params.set('before', String(before));
     requestJson<ClaimRecordPage>(`/api/claim-records?${params}`).then(
       (result) => { if (current) { setPage(result); setError(''); } },
       (failure: Error) => { if (current) { setPage(undefined); setError(failure.message); } },
     );
     return () => { current = false; };
-  }, [query, before]);
+  }, [query, before, month]);
 
   return (
     <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 text-sm">

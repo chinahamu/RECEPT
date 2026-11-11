@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { validateResponse } from '../integration/recept-v1/contract.mjs';
 import { createWorkspaceApi } from './api';
 import { readAccessAudit, verifyAccessAudit } from './accessAudit';
@@ -16,7 +16,7 @@ import { openWorkspace } from './workspace';
 const fixtures = JSON.parse(readFileSync('integration/recept-v1/fixtures.json', 'utf8'));
 const encode = (message: unknown) => JSON.stringify(message);
 
-test('DENCAL intake deduplicates raw messages, holds exceptions and explicitly matches an existing patient', async (t) => {
+async function setup(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'recept-inbox-test-'));
   const filename = join(directory, 'recept.sqlite3');
   execFileSync('python3', ['database/init.py', filename]);
@@ -48,7 +48,7 @@ test('DENCAL intake deduplicates raw messages, holds exceptions and explicitly m
   ]);
   store.masters.import(masterFileParams('s_20261101.csv', '2026-11-01'), procedures);
   store.close();
-  const open = () => openWorkspace(filename);
+  const open = () => openWorkspace(filename, true);
   let api = createWorkspaceApi(open);
   const server = createServer((req, res) => api.middleware(req, res, () => res.writeHead(404).end()));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -88,6 +88,13 @@ test('DENCAL intake deduplicates raw messages, holds exceptions and explicitly m
     return response.json();
   }
 
+  return { initial, patient, otherPatient, filename, origin, machine, ui, authorization, env, adminPassword,
+    send, login, staff, responseJson, restart: () => { api.close(); api = createWorkspaceApi(open); } };
+}
+
+test('DENCAL intake deduplicates raw messages, holds exceptions and explicitly matches an existing patient', async (t) => {
+  const { initial, patient, otherPatient, filename, origin, machine, ui, authorization, env, adminPassword,
+    send, login, staff, responseJson, restart } = await setup(t);
   const { initial: first, correction, unknown } = fixtures.messages;
   const bytes = encode(first);
   assert.equal((await send(bytes, {})).status, 401);
@@ -145,8 +152,7 @@ test('DENCAL intake deduplicates raw messages, holds exceptions and explicitly m
   assert.equal((await staff(matchPath, cookie, { patientId: otherPatient.id, chartNumber: otherPatient.chartNumber })).status, 409);
   assert.deepEqual((await responseJson(await staff('/api/workspace', cookie), 200)).patients, initial.patients);
 
-  api.close();
-  api = createWorkspaceApi(open);
+  restart();
   cookie = await login();
   const receipt = await responseJson(await fetch(origin + machine + '/receipts/' + correction.integrationId, { headers: authorization }), 200);
   assert.equal(receipt.status, 'received');
@@ -176,4 +182,168 @@ test('DENCAL intake deduplicates raw messages, holds exceptions and explicitly m
     assert.doesNotMatch(JSON.stringify(events), /test-integration-key|実施数量を訂正/);
     assert.throws(() => db.exec('UPDATE dencal_inbox SET body_sha256 = body_sha256'), /immutable/);
   } finally { db.close(); }
+});
+
+test('DENCAL drafts apply reviewed monthly differences and preserve manual entries and confirmed versions', async (t) => {
+  const { initial, patient, filename, origin, machine, ui, authorization, adminPassword,
+    send, login, staff, responseJson, restart } = await setup(t);
+  const reception = await login();
+  let admin = await login('inbox-admin', adminPassword);
+  const list = () => responseJsonPromise(staff(ui, admin), 200);
+  const workspace = () => responseJsonPromise(staff('/api/workspace', admin), 200);
+  const responseJsonPromise = async (response: Promise<Response>, status: number) => responseJson(await response, status);
+  const readDraft = (seq: number, status = 200) => responseJsonPromise(staff(`${ui}/${seq}/draft`, admin), status);
+  const apply = (seq: number, reviewHash: string, status = 200) => responseJsonPromise(
+    staff(`${ui}/${seq}/draft`, admin, { reviewHash, qualificationConfirmed: true }), status);
+  const preview = (month: string) => responseJsonPromise(
+    staff(`/api/claim-records?patientId=${patient.id}&month=${month}`, admin), 200);
+  const finalize = (month: string, draft: { revision: number; reviewHash: string }, status = 200, correctionReason?: string) =>
+    responseJsonPromise(staff('/api/workspace', admin, { revision: draft.revision, action: {
+      type: 'finalize', month, patientId: patient.id, reviewHash: draft.reviewHash, correctionReason,
+    } }), status);
+  const getRecord = (id: string) => responseJsonPromise(staff(`/api/claim-records?id=${id}`, admin), 200);
+  const fixture = fixtures.messages.initial;
+  const first = { ...fixture, performances: [
+    { ...fixture.performances[0], performedOn: '2026-11-30' },
+    { ...fixture.performances[0], id: 'december-line', performedOn: '2026-12-01' },
+  ] };
+  const second = { ...fixtures.messages.correction, performances: [
+    { ...first.performances[0], performedOn: '2026-12-02', quantity: 2 },
+    first.performances[1],
+  ] };
+  const third = { ...second, integrationId: 'fixture-send-intermediate', transferRevision: 3, previousTransferRevision: 2,
+    performances: [{ ...second.performances[0], status: 'cancelled' }, second.performances[1]],
+  };
+  const cancel = { ...fixtures.messages.cancel, transferRevision: 4, previousTransferRevision: 3 };
+  const another = { ...fixture, integrationId: 'other-encounter', encounterId: 'other-encounter' };
+
+  await responseJsonPromise(send(encode(first)), 202);
+  const firstSeq = (await list()).records[0].seq;
+  await readDraft(firstSeq, 409);
+  await responseJsonPromise(staff(`${ui}/${firstSeq}/match`, reception, {
+    patientId: patient.id, chartNumber: patient.chartNumber,
+  }), 200);
+  assert.equal((await staff(`${ui}/${firstSeq}/draft`, reception)).status, 403);
+  assert.equal((await staff(`${ui}/${firstSeq}/draft`, reception, { qualificationConfirmed: true })).status, 403);
+  assert.deepEqual((await workspace()).patients, initial.patients);
+  const initialReview = await readDraft(firstSeq);
+  assert.deepEqual(initialReview.months, [
+    { month: '2026-11', confirmedVersion: null }, { month: '2026-12', confirmedVersion: null },
+  ]);
+  assert.equal(initialReview.diagnoses[0].after.outcome, '継続');
+  assert.equal((await staff(`${ui}/${firstSeq}/draft`, admin, {
+    reviewHash: initialReview.reviewHash, qualificationConfirmed: false,
+  })).status, 400);
+  await responseJsonPromise(staff('/api/workspace', admin, {
+    revision: initial.revision, action: { type: 'toggleOffline' },
+  }), 200);
+  await apply(firstSeq, initialReview.reviewHash, 409);
+
+  const fresh = await readDraft(firstSeq);
+  const db = new DatabaseSync(filename);
+  try {
+    db.exec(`CREATE TRIGGER test_fail_dencal_apply BEFORE INSERT ON access_audit
+      WHEN json_extract(NEW.payload, '$.operation') = 'apply-dencal-draft'
+      BEGIN SELECT RAISE(ABORT, 'test audit failure'); END`);
+    await apply(firstSeq, fresh.reviewHash, 500);
+    assert.equal(db.prepare('SELECT count(*) AS total FROM dencal_draft_applications').get()?.total, 0);
+    assert.deepEqual((await readDraft(firstSeq)).months, fresh.months);
+  } finally {
+    db.exec('DROP TRIGGER test_fail_dencal_apply');
+    db.close();
+  }
+  assert.equal((await apply(firstSeq, fresh.reviewHash)).receipt.status, 'applied');
+  await apply(firstSeq, fresh.reviewHash, 409);
+  const machineReceipt = await responseJsonPromise(fetch(`${origin}${machine}/receipts/${first.integrationId}`, { headers: authorization }), 200);
+  assert.equal(machineReceipt.status, 'applied');
+  assert.equal(validateResponse(machineReceipt), true);
+  assert.deepEqual(await responseJsonPromise(send(encode(first)), 200), machineReceipt);
+
+  await responseJsonPromise(send(encode(another)), 202);
+  const anotherSeq = (await list()).records[0].seq;
+  await apply(anotherSeq, (await readDraft(anotherSeq)).reviewHash);
+
+  // Ordinary month edits update hand-entered rows while retaining integrated rows and other months.
+  const initialDecember = await preview('2026-12');
+  const line = initialDecember.snapshot.patient.billingItems[0];
+  const beforeManual = await workspace();
+  const sourceDiagnosis = initialDecember.snapshot.patient.diagnoses.find(({ dencalSource }: { dencalSource?: unknown }) => dencalSource);
+  await responseJsonPromise(staff('/api/workspace', admin, { revision: beforeManual.revision, action: {
+    type: 'update', month: '2026-12', patientId: patient.id, diagnoses: [
+      ...patient.diagnoses, { ...sourceDiagnosis, isMain: false },
+    ],
+    billingItems: [{ ...line, quantity: 90 }, { ...line, id: 'december-manual', date: '2026-12-03', quantity: 3 }],
+    summary: '手入力の明細を追加',
+  } }), 200);
+  const november = await preview('2026-11');
+  const december = await preview('2026-12');
+  assert.equal(december.snapshot.calculation.totalPoints, 400);
+  assert.equal(december.snapshot.patient.visitCountThisMonth, 2);
+  assert.equal(december.snapshot.patient.diagnoses.find(({ id }: { id: string }) => id === sourceDiagnosis.id).isMain, true);
+  assert.deepEqual(november.snapshot.patient.billingItems.filter(({ dencalSource }: { dencalSource?: unknown }) => !dencalSource),
+    patient.billingItems);
+  await finalize('2026-12', november, 409);
+  const novV1 = (await finalize('2026-11', november)).claimRecord;
+  const decV1 = (await finalize('2026-12', await preview('2026-12'))).claimRecord;
+  assert.equal(decV1.enteredBy.actor.userId, 'inbox-admin');
+
+  await responseJsonPromise(send(encode(second)), 202);
+  const correctionSeq = (await list()).records[0].seq;
+  const correctionReview = await readDraft(correctionSeq);
+  assert.deepEqual(correctionReview.months, [
+    { month: '2026-11', confirmedVersion: 1 }, { month: '2026-12', confirmedVersion: 1 },
+  ]);
+  assert.equal(correctionReview.billingItems[0].before.date, '2026-11-30');
+  assert.equal(correctionReview.billingItems[0].after.date, '2026-12-02');
+  await apply(correctionSeq, correctionReview.reviewHash);
+
+  restart();
+  admin = await login('inbox-admin', adminPassword);
+  const changedDec = await preview('2026-12');
+  assert.equal(changedDec.snapshot.calculation.totalPoints, 600);
+  assert.equal(changedDec.previous.id, decV1.id);
+  assert.equal(changedDec.snapshot.patient.billingItems.find(({ id }: { id: string }) => id === line.id).dencalSource.transferRevision, 1);
+  assert.deepEqual(await getRecord(novV1.id), novV1);
+  assert.deepEqual(await getRecord(decV1.id), decV1);
+  const csv = await responseJsonPromise(staff('/api/claim-preview?month=2026-12', admin), 200);
+  assert.equal(csv.month, '2026-12');
+  assert.match(csv.csv, /IR,[^\n]*2026-12/);
+  assert.equal(csv.patientCount, 1);
+  await finalize('2026-12', changedDec, 400);
+  const decV2 = (await finalize('2026-12', changedDec, 200, '実施日の訂正')).claimRecord;
+  assert.equal(decV2.previousId, decV1.id);
+  assert.equal(decV2.version, 2);
+
+  await responseJsonPromise(send(encode(third)), 202);
+  const thirdSeq = (await list()).records[0].seq;
+  const lineCancelReview = await readDraft(thirdSeq);
+  assert.deepEqual(lineCancelReview.months, [{ month: '2026-12', confirmedVersion: 2 }]);
+  assert.equal(lineCancelReview.billingItems.length, 1);
+  assert.equal(lineCancelReview.billingItems[0].before.date, '2026-12-02');
+  assert.equal(lineCancelReview.billingItems[0].after, null);
+  await responseJsonPromise(send(encode(cancel)), 202);
+  const cancelSeq = (await list()).records[0].seq;
+  const cancelReview = await readDraft(cancelSeq);
+  assert.deepEqual(cancelReview.months.map(({ month }: { month: string }) => month), ['2026-11', '2026-12']);
+  assert.ok(cancelReview.billingItems.every(({ after }: { after: unknown }) => after === null));
+  await apply(cancelSeq, cancelReview.reviewHash);
+  await readDraft(thirdSeq, 409);
+  assert.deepEqual(await getRecord(decV2.id), decV2);
+
+  const novAfterCancel = await preview('2026-11');
+  assert.equal(novAfterCancel.snapshot.patient.billingItems.filter(({ dencalSource }: { dencalSource?: unknown }) => dencalSource).length, 1);
+  const decAfterCancel = await preview('2026-12');
+  assert.deepEqual(decAfterCancel.snapshot.patient.billingItems.map(({ id }: { id: string }) => id), ['december-manual']);
+  assert.equal(decAfterCancel.snapshot.calculation.totalPoints, 300);
+  const decV3 = (await finalize('2026-12', decAfterCancel, 200, '受診を取消')).claimRecord;
+  assert.equal(decV3.previousId, decV2.id);
+  const history = await responseJsonPromise(staff('/api/claim-records?month=2026-12', admin), 200);
+  assert.deepEqual(history.records.map(({ version }: { version: number }) => version), [3, 2, 1]);
+  assert.equal((await staff('/api/claim-records?month=2026-13', admin)).status, 400);
+
+  await responseJsonPromise(staff('/api/workspace', admin, {
+    revision: (await workspace()).revision, action: { type: 'reset' },
+  }), 200);
+  assert.deepEqual(await getRecord(decV3.id), decV3);
+  assert.equal((await responseJsonPromise(staff(`${ui}/${cancelSeq}`, admin), 200)).receipt.status, 'confirmation_required');
 });

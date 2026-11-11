@@ -2,13 +2,13 @@ import { useEffect, useState } from 'react';
 import type { ClinicalMasterEntries } from '../data/officialMasters';
 import { requestApi } from './workspaceApi';
 
-export function useClinicalMasterSearch<K extends keyof ClinicalMasterEntries>(kind: K, query: string) {
+export function useClinicalMasterSearch<K extends keyof ClinicalMasterEntries>(kind: K, query: string, date: string) {
   const [entries, setEntries] = useState<ClinicalMasterEntries[K][]>([]);
   const [error, setError] = useState('');
   useEffect(() => {
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      const params = new URLSearchParams({ clinical: kind, q: query });
+      const params = new URLSearchParams({ clinical: kind, q: query, date });
       requestApi<ClinicalMasterEntries[K][]>(
         `/api/official-masters?${params}`, { signal: controller.signal },
       ).then((rows) => {
@@ -25,6 +25,6 @@ export function useClinicalMasterSearch<K extends keyof ClinicalMasterEntries>(k
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [kind, query]);
+  }, [kind, query, date]);
   return { entries, error };
 }

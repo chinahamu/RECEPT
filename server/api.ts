@@ -6,7 +6,7 @@ import { hasStaffRole, type Staff, type StaffRole } from '../src/types/staff';
 import type { Workspace, WorkspaceAction } from '../src/types/workspace';
 import { sessionCookie, staffSessions } from './staffSessions';
 import { isLocalRequest, isSameOriginApiRequest, protectedResponseHeaders } from './browserProtection';
-import { requestSchema } from './validation';
+import { date, month, requestSchema, reviewHash } from './validation';
 import { openWorkspace } from './workspace';
 import { WorkspaceError } from './errors';
 import { masterFileParams } from './officialMasters';
@@ -21,6 +21,7 @@ const credentialsSchema = z.object({
 
 const integrationId = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 const integrationToken = /^[A-Za-z0-9._~+\/=-]{1,512}$/;
+const draftApplySchema = z.strictObject({ reviewHash, qualificationConfirmed: z.literal(true) });
 const matchSchema = z.strictObject({ patientId: z.string().min(1).max(100), chartNumber: z.string().min(1).max(100) });
 
 function integrationSource(req: IncomingMessage) {
@@ -38,6 +39,12 @@ const actionRoles: Record<WorkspaceAction['type'], StaffRole> = {
   register: 'reception', update: 'physician', fix: 'physician', batchFix: 'physician',
   finalize: 'physician', toggleOffline: 'admin', reset: 'admin', exportCsv: 'admin', snapshot: 'admin',
 };
+
+function requestedMonth(params: URLSearchParams) {
+  const value = params.get('month');
+  if (value !== null && !month.safeParse(value).success) throw new WorkspaceError(400, '診療月が正しくありません。');
+  return value;
+}
 
 function visibleWorkspace(workspace: Workspace, staff: Staff): Workspace {
   return hasStaffRole(staff, 'admin') ? workspace : { ...workspace, activity: [], dataExportsEnabled: false };
@@ -101,7 +108,7 @@ export function createWorkspaceApi(
       const path = req.url?.split('?')[0];
       const isSession = path === '/api/session' || path === '/api/login' || path === '/api/logout';
       const machine = path?.startsWith('/api/integration/v1/') ?? false;
-      const inboxPath = /^\/api\/integration\/inbox(?:\/([0-9]+)(\/match)?)?$/.exec(path ?? '');
+      const inboxPath = /^\/api\/integration\/inbox(?:\/([0-9]+)(?:\/(match|draft))?)?$/.exec(path ?? '');
       if (!machine && !inboxPath && !isSession && path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview' &&
           path !== '/api/claim-records') return next();
 
@@ -217,10 +224,10 @@ export function createWorkspaceApi(
 
         const { staff } = await requireRole('reception');
         if (inboxPath) {
-          const [, id, matching] = inboxPath;
-          const method = matching ? 'POST' : 'GET';
-          if (req.method !== method) {
-            res.setHeader('Allow', method);
+          const [, id, operation] = inboxPath;
+          const methods = operation === 'draft' ? ['GET', 'POST'] : [operation === 'match' ? 'POST' : 'GET'];
+          if (!req.method || !methods.includes(req.method)) {
+            res.setHeader('Allow', methods.join(', '));
             throw new WorkspaceError(405, '未対応の操作です。');
           }
           const seq = id ? Number(id) : null;
@@ -233,12 +240,23 @@ export function createWorkspaceApi(
             }
             access.operation = 'list-dencal-inbox';
             sendJson(res, 200, currentStore.listDencal(cursor, access));
-          } else if (matching) {
+          } else if (operation === 'match') {
             access.operation = 'match-dencal-patient';
             const input = matchSchema.safeParse(await readJson(req, 4096));
             if (!input.success) throw new WorkspaceError(400, '紐付け先を確認してください。');
             await requireRole('reception');
             sendJson(res, 200, currentStore.matchDencal(seq, input.data.patientId, input.data.chartNumber, access));
+          } else if (operation === 'draft') {
+            access.operation = req.method === 'POST' ? 'apply-dencal-draft' : 'review-dencal-draft';
+            await requireRole('physician');
+            if (req.method === 'POST') {
+              const input = draftApplySchema.safeParse(await readJson(req, 4096));
+              if (!input.success) throw new WorkspaceError(400, '差分と保険資格の確認が必要です。');
+              await requireRole('physician');
+              sendJson(res, 200, currentStore.applyDencalDraft(seq, input.data.reviewHash, access));
+            } else {
+              sendJson(res, 200, currentStore.previewDencalDraft(seq, access));
+            }
           } else {
             access.operation = 'read-dencal-inbox';
             sendJson(res, 200, currentStore.readDencal(seq, access));
@@ -250,15 +268,16 @@ export function createWorkspaceApi(
           if (req.method === 'GET') {
             const kind = params.get('clinical');
             const importId = params.get('id');
+            const clinicalDate = params.get('date');
             const query = (params.get('q') ?? '').trim();
             const id = Number(importId);
-            if (query.length > 200 || (kind !== null && kind !== 'b' && kind !== 's') ||
+            if ((clinicalDate !== null && (!kind || !date.safeParse(clinicalDate).success)) || query.length > 200 || (kind !== null && kind !== 'b' && kind !== 's') ||
                 (importId !== null && (!Number.isSafeInteger(id) || id < 1))) {
               throw new WorkspaceError(400, 'マスターの検索条件が正しくありません。');
             }
             access.operation = kind ? 'search-clinical-master' : importId === null ? 'list-masters' : 'search-master';
             if (!kind) await requireRole('admin');
-            sendJson(res, 200, currentStore.readMasters(kind, importId === null ? null : id, query, access));
+            sendJson(res, 200, currentStore.readMasters(kind, importId === null ? null : id, query, access, clinicalDate ?? undefined));
           } else if (req.method === 'POST') {
             access.operation = 'import-master';
             await requireRole('admin');
@@ -275,6 +294,7 @@ export function createWorkspaceApi(
           }
         } else if (access.resource === 'claim-records' && req.method === 'GET') {
           const params = new URLSearchParams(req.url?.split('?')[1]);
+          const selectedMonth = requestedMonth(params);
           const patientId = params.get('patientId');
           const id = params.get('id');
           const query = (params.get('q') ?? '').trim();
@@ -282,7 +302,7 @@ export function createWorkspaceApi(
           const exportMode = params.get('export');
           const validId = /^[A-Za-z0-9_-]{1,100}$/;
           if ((patientId !== null && !validId.test(patientId)) || (id !== null && !validId.test(id)) ||
-              (patientId !== null && id !== null) || query.length > 100 ||
+              (patientId !== null && id !== null) || (selectedMonth !== null && id !== null) || query.length > 100 ||
               (exportMode !== null && (exportMode !== '1' || id === null)) ||
               (before !== null && (!/^\d+$/.test(before) || !Number.isSafeInteger(Number(before)) || Number(before) < 1)) ||
               ((patientId !== null || id !== null) && (query || before !== null))) {
@@ -292,16 +312,16 @@ export function createWorkspaceApi(
             ? (exportMode ? 'export-claim-record' : 'read-claim-record') : 'list-claim-records';
           await requireRole(exportMode ? 'admin' : 'physician');
           if (patientId) {
-            sendJson(res, 200, currentStore.previewConfirmation(patientId, access));
+            sendJson(res, 200, currentStore.previewConfirmation(patientId, access, selectedMonth ?? undefined));
           } else if (id) {
             sendJson(res, 200, currentStore.readClaimRecord(id, access, exportMode === '1'));
           } else {
-            sendJson(res, 200, currentStore.listClaimRecords(query, before === null ? null : Number(before), access));
+            sendJson(res, 200, currentStore.listClaimRecords(query, before === null ? null : Number(before), access, selectedMonth));
           }
         } else if (req.method === 'GET') {
           if (path === '/api/claim-preview') {
             await requireRole('admin');
-            sendJson(res, 200, currentStore.preview(access));
+            sendJson(res, 200, currentStore.preview(access, requestedMonth(new URLSearchParams(req.url?.split('?')[1])) ?? undefined));
           } else {
             sendJson(res, 200, visibleWorkspace(currentStore.read(access), staff));
           }

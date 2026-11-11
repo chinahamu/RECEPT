@@ -1,3 +1,5 @@
+import type { BillingLineItem, PatientDiagnosis } from './receipt';
+
 export type IntegrationSource = { facilityId: string; senderId: string };
 export type InboxIssue = { code: string; path: string };
 export type IntegrationReceipt = {
@@ -30,4 +32,18 @@ export interface InboxDetail extends InboxRecord {
 export interface InboxPage {
   records: InboxRecord[];
   nextBefore: number | null;
+}
+
+export interface DraftChange<T> {
+  before: T | null;
+  after: T | null;
+}
+
+export interface DencalDraftReview {
+  reviewHash: string;
+  previousTransferRevision: number | null;
+  qualification: { insuranceCategory: string; insurerNumber: string; symbolNumber: string; verified: boolean };
+  months: { month: string; confirmedVersion: number | null }[];
+  diagnoses: DraftChange<PatientDiagnosis>[];
+  billingItems: DraftChange<BillingLineItem>[];
 }

@@ -12,6 +12,7 @@ import type { PatientView } from '../types/workspace';
 import { CLINIC_FACILITY_INFO, DEMO_MONTH } from '../data/demoWorkspace';
 
 interface BatchAuditConsoleProps {
+  month: string;
   patients: PatientView[];
   onApplyAutoFix: (patientId: string, findingId: string) => void;
   canEdit: boolean;
@@ -22,6 +23,7 @@ interface BatchAuditConsoleProps {
 
 export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
   patients,
+  month,
   onApplyAutoFix,
   onBatchAutoFixAll,
   canEdit,
@@ -325,7 +327,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
                     {activeAudit.patient.name} 様のレセプト自動点検結果（{activeAudit.findings.length}件）
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    前月請求点数: <span className="font-mono tabular-nums">{activeAudit.patient.previousMonthTotalPoints}点</span> · 当月請求点数: <span className="font-mono tabular-nums">{activeAudit.calc.totalPoints}点</span>
+                    {month === DEMO_MONTH && <>前月請求点数: <span className="font-mono tabular-nums">{activeAudit.patient.previousMonthTotalPoints}点</span> · </>}当月請求点数: <span className="font-mono tabular-nums">{activeAudit.calc.totalPoints}点</span>
                   </p>
                 </div>
                 <button
@@ -408,7 +410,7 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
                   </h3>
                 </div>
                 <div className="text-right text-xs font-mono tabular-nums text-slate-700">
-                  <div>{DEMO_MONTH} · 都道府県番号 {CLINIC_FACILITY_INFO.prefectureCode}</div>
+                  <div>{month} · 都道府県番号 {CLINIC_FACILITY_INFO.prefectureCode}</div>
                   <div>医療機関コード: {CLINIC_FACILITY_INFO.facilityCode}</div>
                 </div>
               </div>

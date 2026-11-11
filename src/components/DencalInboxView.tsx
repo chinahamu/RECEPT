@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import type { InboxDetail, InboxPage, IntegrationReceipt } from '../types/dencalInbox';
-import type { PatientRecord } from '../types/receipt';
+import type { DencalDraftReview, DraftChange, InboxDetail, InboxPage, IntegrationReceipt } from '../types/dencalInbox';
+import type { BillingLineItem, PatientDiagnosis, PatientRecord } from '../types/receipt';
 import { requestApi, requestJson } from '../utils/workspaceApi';
 
 const endpoint = '/api/integration/inbox';
@@ -20,15 +20,46 @@ const issueLabels: Record<string, string> = {
 };
 const normalize = (value: string) => value.normalize('NFKC').toLowerCase().replace(/\s/g, '');
 
+function lineLabel(item: BillingLineItem | PatientDiagnosis) {
+  if ('date' in item) return `${item.date} · ${item.code} ${item.name} · ${item.points}点 × ${item.quantity} ${item.unit} · マスター版 ${item.masterImportId}`;
+  return `${item.startDate} · ${item.diseaseCode} ${item.diseaseName} · ${item.outcome}${item.isMain ? ' · 主病' : ''}${item.isSuspected ? ' · 疑い' : ''} · 対象月 ${item.dencalMonths?.join('、') || 'なし'} · マスター版 ${item.masterImportId}`;
+}
+
+function DraftDiff({ review }: { review: DencalDraftReview }) {
+  const changes: DraftChange<BillingLineItem | PatientDiagnosis>[] = [...review.diagnoses, ...review.billingItems];
+  if (!changes.length) return <p className="text-sm">下書きの変更はありません。反映すると、この連携版を確認済みとして記録します。</p>;
+  return <div className="overflow-x-auto">
+    <table className="w-full text-left text-sm">
+      <thead className="bg-slate-100"><tr>
+        <th scope="col" className="p-2">操作</th>
+        <th scope="col" className="p-2">反映前</th>
+        <th scope="col" className="p-2">反映後</th>
+      </tr></thead>
+      <tbody className="divide-y divide-slate-100">
+        {changes.map(({ before, after }) => <tr key={(after ?? before)?.id}>
+          <td className="whitespace-nowrap p-2">{before ? (after ? '変更' : '取消') : '追加'}</td>
+          <td className="p-2">{before ? lineLabel(before) : '—'}</td>
+          <td className="p-2">{after ? lineLabel(after) : '—'}</td>
+        </tr>)}
+      </tbody>
+    </table>
+  </div>;
+}
+
 type Props = {
+  canEdit: boolean;
+  openDraft: (patientId: string, month: string) => void;
   patients: Pick<PatientRecord, 'id' | 'name' | 'kana' | 'chartNumber' | 'birthDate'>[];
   refreshPatients: () => Promise<unknown>;
 };
 
-export function DencalInboxView({ patients, refreshPatients }: Props) {
+export function DencalInboxView({ patients, refreshPatients, canEdit, openDraft }: Props) {
   const [before, setBefore] = useState<number | null>(null);
   const [page, setPage] = useState<InboxPage>();
   const [detail, setDetail] = useState<InboxDetail>();
+  const [review, setReview] = useState<DencalDraftReview>();
+  const [appliedMonths, setAppliedMonths] = useState<DencalDraftReview['months']>();
+  const [qualificationConfirmed, setQualificationConfirmed] = useState(false);
   const [query, setQuery] = useState('');
   const [patientId, setPatientId] = useState('');
   const [confirmed, setConfirmed] = useState(false);
@@ -74,6 +105,9 @@ export function DencalInboxView({ patients, refreshPatients }: Props) {
       const result = await requestJson<InboxDetail>(`${endpoint}/${seq}`);
       if (!mounted.current) return;
       setDetail(result);
+      setReview(undefined);
+      setAppliedMonths(undefined);
+      setQualificationConfirmed(false);
       setQuery('');
       setPatientId('');
       setConfirmed(false);
@@ -93,6 +127,33 @@ export function DencalInboxView({ patients, refreshPatients }: Props) {
     });
   }
 
+  function previewDraft() {
+    if (!detail) return;
+    void run(async () => {
+      setReview(undefined);
+      setQualificationConfirmed(false);
+      const result = await requestJson<DencalDraftReview>(`${endpoint}/${detail.seq}/draft`);
+      if (mounted.current) setReview(result);
+    });
+  }
+
+  function applyDraft() {
+    if (!detail || !review || !qualificationConfirmed) return;
+    void run(async () => {
+      setReview(undefined);
+      setQualificationConfirmed(false);
+      const result = await requestJson<InboxDetail>(`${endpoint}/${detail.seq}/draft`, {
+        reviewHash: review.reviewHash, qualificationConfirmed,
+      });
+      if (!mounted.current) return;
+      setDetail(result);
+      await refreshPatients();
+      if (!mounted.current) return;
+      setAppliedMonths(review.months);
+      await readPage(before);
+    });
+  }
+
   return (
     <section className="space-y-4" aria-labelledby="dencal-inbox-title">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -101,7 +162,11 @@ export function DencalInboxView({ patients, refreshPatients }: Props) {
           await readPage(null);
           if (detail && mounted.current) {
             const result = await requestJson<InboxDetail>(`${endpoint}/${detail.seq}`);
-            if (mounted.current) setDetail(result);
+            if (mounted.current) {
+              setDetail(result);
+              setReview(undefined);
+              setQualificationConfirmed(false);
+            }
           }
         })}>再読込</button>
       </div>
@@ -196,6 +261,45 @@ export function DencalInboxView({ patients, refreshPatients }: Props) {
                 </label>
               )}
               <button type="button" className={button} disabled={busy || !confirmed || !selected} onClick={link}>患者を紐付ける</button>
+            </div>
+          )}
+          {canEdit && detail.receipt.status === 'received' && !review && (
+            <button type="button" className={button} disabled={busy} onClick={previewDraft}>下書きの差分を確認</button>
+          )}
+          {review && (
+            <div className="space-y-3 border-t border-slate-200 pt-3">
+              <h3 className="font-semibold">請求下書きへの反映内容</h3>
+              {review.previousTransferRevision !== null &&
+                <p className="text-sm">反映済みの連携第{review.previousTransferRevision}版との差分</p>}
+              {!!review.months.length && <ul className="space-y-1 text-sm">
+                {review.months.map(({ month, confirmedVersion }) => (
+                  <li key={month}>
+                    {month} {confirmedVersion === null ? '下書き' : `確定第${confirmedVersion}版あり · 反映後に理由を入力して訂正確定`}
+                  </li>
+                ))}
+              </ul>}
+              <DraftDiff review={review} />
+              <p className="text-sm">
+                台帳の保険資格 {review.qualification.insuranceCategory} · 保険者番号 {review.qualification.insurerNumber}
+                 · 記号番号 {review.qualification.symbolNumber}{' · '}{review.qualification.verified ? 'デモ確認済み' : '台帳の確認フラグなし'}
+              </p>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={qualificationConfirmed} disabled={busy}
+                  onChange={(event) => setQualificationConfirmed(event.target.checked)} />
+                対象患者・保険資格・反映内容を確認しました
+              </label>
+              <button type="button" className={button} disabled={busy || !qualificationConfirmed} onClick={applyDraft}>
+                下書きに反映
+              </button>
+            </div>
+          )}
+          {appliedMonths && detail.patient && (
+            <div className="flex flex-wrap items-center gap-2">
+              <p role="status" className="text-sm font-medium">下書きに反映しました。</p>
+              {appliedMonths.map(({ month }) => (
+                <button key={month} type="button" className={button} disabled={busy}
+                  onClick={() => openDraft(detail.patient!.id, month)}>{month}の下書きを開く</button>
+              ))}
             </div>
           )}
         </section>

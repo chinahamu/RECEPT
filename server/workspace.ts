@@ -1,15 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { INITIAL_PATIENTS } from '../src/data/demoWorkspace';
+import { DEMO_DATE, DEMO_MONTH, INITIAL_PATIENTS } from '../src/data/demoWorkspace';
 import type { LocalActivityEntry, PatientRecord } from '../src/types/receipt';
 import type { ClaimPreview, Workspace, WorkspaceResult } from '../src/types/workspace';
 import {
   applyAutoFixToPatient, calculateLineItemPoints, calculateReceiptPointsAndCopay,
-  generateDemoClaimCsv, runMhlwReceiptCheck,
+  generateDemoClaimCsv, patientForMonth, referenceDateForMonth, runMhlwReceiptCheck,
 } from '../src/utils/receiptEngine';
 import type { ValidRequest } from './validation';
 import { dencalInbox } from './dencalInbox';
+import { prepareDencalDraft, readDencalDrafts } from './dencalDrafts';
 import type { IntegrationSource } from '../src/types/dencalInbox';
 import { WorkspaceError } from './errors';
 import { officialMasters } from './officialMasters';
@@ -44,10 +45,11 @@ function readPatients(db: DatabaseSync, patientId?: string): PatientRecord[] {
   const items = db.prepare('SELECT detail FROM billing_items WHERE patient_id = ? ORDER BY position');
   return profiles.map((row) => {
     const profile: Profile = JSON.parse(String(row.profile));
+    const drafts = readDencalDrafts(db, profile.id);
     return {
       ...profile,
-      diagnoses: diagnoses.all(profile.id).map((entry) => JSON.parse(String(entry.detail))),
-      billingItems: items.all(profile.id).map((entry) => JSON.parse(String(entry.detail))),
+      diagnoses: [...diagnoses.all(profile.id).map((entry) => JSON.parse(String(entry.detail))), ...drafts.flatMap((draft) => draft.diagnoses)],
+      billingItems: [...items.all(profile.id).map((entry) => JSON.parse(String(entry.detail))), ...drafts.flatMap((draft) => draft.billingItems)],
     };
   });
 }
@@ -63,8 +65,8 @@ function writePatient(db: DatabaseSync, patient: PatientRecord) {
   db.prepare('DELETE FROM billing_items WHERE patient_id = ?').run(patient.id);
   const diagnosis = db.prepare('INSERT INTO diagnoses VALUES (?, ?, ?, ?)');
   const item = db.prepare('INSERT INTO billing_items VALUES (?, ?, ?, ?)');
-  diagnoses.forEach((entry, index) => diagnosis.run(patient.id, index, entry.id, JSON.stringify(entry)));
-  billingItems.forEach((entry, index) => item.run(patient.id, index, entry.id, JSON.stringify(entry)));
+  diagnoses.filter((entry) => !entry.dencalSource).forEach((entry, index) => diagnosis.run(patient.id, index, entry.id, JSON.stringify(entry)));
+  billingItems.filter((entry) => !entry.dencalSource).forEach((entry, index) => item.run(patient.id, index, entry.id, JSON.stringify(entry)));
 }
 
 function replacePatients(db: DatabaseSync, patients: PatientRecord[]) {
@@ -97,15 +99,14 @@ function workspaceFromDb(db: DatabaseSync, dataExportsEnabled: boolean): Workspa
   };
 }
 
-function claimPreview(records: ClaimRecord[], revision: number): ClaimPreview {
+function claimPreview(records: ClaimRecord[], revision: number, month = DEMO_MONTH): ClaimPreview {
   const snapshots = records.map(({ snapshot }) => snapshot);
   const facility = snapshots[0]?.facility;
-  const month = snapshots[0]?.month;
   if (snapshots.some((snapshot) => JSON.stringify(snapshot.facility) !== JSON.stringify(facility))) {
     throw new WorkspaceError(409, '医療機関情報が異なる確定記録を同じCSVに出力できません。');
   }
   return {
-    revision,
+    revision, month,
     csv: generateDemoClaimCsv(snapshots.map(({ patient, calculation, linePoints }) =>
       ({ ...patient, calculation, linePoints })), facility, month),
     patientCount: records.length,
@@ -158,6 +159,10 @@ function applyAction(db: DatabaseSync, masters: ReturnType<typeof clinicalMaster
   }
 
   const patients = readPatients(db);
+  const month = 'month' in action ? action.month : undefined;
+  const forMonth = (patient: PatientRecord) => month ? patientForMonth(patient, month) : patient;
+  const referenceDate = month ? referenceDateForMonth(month) : DEMO_DATE;
+  const findings = (patient: PatientRecord) => runMhlwReceiptCheck(forMonth(patient), referenceDate);
   if (action.type === 'register') {
     if (patients.length >= 250) throw new WorkspaceError(400, 'デモ患者の登録上限に達しました。');
     let chartNumber = 1210 + patients.length;
@@ -179,9 +184,9 @@ function applyAction(db: DatabaseSync, masters: ReturnType<typeof clinicalMaster
     for (const patient of patients) {
       let current = patient;
       for (let pass = 0; pass < 8; pass++) {
-        const finding = runMhlwReceiptCheck(current).find((entry) => entry.severity !== 'opportunity' && entry.fixAction);
+        const finding = findings(current).find((entry) => entry.severity !== 'opportunity' && entry.fixAction);
         if (!finding?.fixAction) break;
-        current = applyAutoFixToPatient(current, finding.fixAction);
+        current = applyAutoFixToPatient(current, finding.fixAction, referenceDate);
       }
       if (current !== patient) {
         writePatient(db, current);
@@ -195,13 +200,28 @@ function applyAction(db: DatabaseSync, masters: ReturnType<typeof clinicalMaster
   const patient = patients.find((entry) => entry.id === action.patientId);
   if (!patient) throw new WorkspaceError(404, '対象のデモ患者が見つかりません。');
   if (action.type === 'update') {
-    const next = withMasterData(masters, { ...patient, diagnoses: action.diagnoses, billingItems: action.billingItems }, patient);
+    const manualDiagnoses = patient.diagnoses.filter(({ dencalSource }) => !dencalSource);
+    const manualItems = patient.billingItems.filter(({ dencalSource }) => !dencalSource);
+    const sourceIds = new Set([...patient.diagnoses, ...patient.billingItems]
+      .filter(({ dencalSource }) => dencalSource).map(({ id }) => id));
+    const diagnoses = action.diagnoses.filter(({ id }) => !sourceIds.has(id));
+    const billingItems = action.billingItems.filter(({ id }) => !sourceIds.has(id));
+    if (month && (diagnoses.some(({ startDate }) => startDate.slice(0, 7) > month) ||
+        billingItems.some(({ id, date }) => date.slice(0, 7) !== month ||
+          manualItems.some((old) => old.id === id && old.date.slice(0, 7) !== month)))) {
+      throw new WorkspaceError(400, '選択した診療月の明細を指定してください。');
+    }
+    const next = withMasterData(masters, {
+      ...patient,
+      diagnoses: month ? [...diagnoses, ...manualDiagnoses.filter(({ startDate }) => startDate.slice(0, 7) > month)] : diagnoses,
+      billingItems: month ? [...billingItems, ...manualItems.filter(({ date }) => date.slice(0, 7) !== month)] : billingItems,
+    }, patient);
     writePatient(db, evaluated(next));
     record(db, 'BILLING_UPDATE', patient.chartNumber, action.summary);
   } else {
-    const finding = runMhlwReceiptCheck(patient).find((entry) => entry.id === action.findingId);
+    const finding = findings(patient).find((entry) => entry.id === action.findingId);
     if (!finding?.fixAction) throw new WorkspaceError(400, '現在の点検結果に補正候補がありません。');
-    writePatient(db, applyAutoFixToPatient(patient, finding.fixAction));
+    writePatient(db, applyAutoFixToPatient(patient, finding.fixAction, referenceDate));
     record(db, 'AUDIT_AUTO_FIX', patient.chartNumber, `デモ点検補正: ${finding.title} → ${finding.fixAction.label}`);
   }
   return [patient.id];
@@ -226,6 +246,7 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       if (version < 4) db.exec(readFileSync(new URL('../database/004-claim-records.sql', import.meta.url), 'utf8'));
       if (version < 5) db.exec(readFileSync(new URL('../database/005-staff.sql', import.meta.url), 'utf8'));
       if (version < 6) db.exec(readFileSync(new URL('../database/006-dencal-inbox.sql', import.meta.url), 'utf8'));
+      if (version < 7) db.exec(readFileSync(new URL('../database/007-dencal-drafts.sql', import.meta.url), 'utf8'));
       if (db.prepare('SELECT seeded FROM workspace WHERE id = 1').get()?.seeded) return;
       replacePatients(db, INITIAL_PATIENTS);
       db.exec('UPDATE workspace SET seeded = 1 WHERE id = 1');
@@ -245,6 +266,15 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
 
   const clinical = clinicalMasters(db);
   const inbox = dencalInbox(db, clinical);
+  function reviewDencal(seq: number) {
+    const entry = inbox.detail(seq);
+    if (entry.receipt.status !== 'received' || !entry.patient) {
+      throw new WorkspaceError(409, entry.receipt.status === 'applied' ? 'この版は反映済みです。' : '患者・マスター・受信順の確認が必要です。');
+    }
+    const patient = patientForClaim(entry.patient.id);
+    return { entry, patient, ...prepareDencalDraft(db, clinical, entry, inbox.source(seq).message, patient, revisionNow()) };
+  }
+
   const masters = officialMasters(db, (work) => transaction(db, work, true));
   return {
     close: () => db.close(),
@@ -258,22 +288,22 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       });
       return workspace;
     }, Boolean(access)),
-    preview: (access?: AuditAccess) => transaction(db, () => {
+    preview: (access?: AuditAccess, month = DEMO_MONTH) => transaction(db, () => {
       requireDataExports();
-      const records = claims.latestForExport();
-      const result = claimPreview(records, revisionNow());
+      const records = claims.latestForExport(month);
+      const result = claimPreview(records, revisionNow(), month);
       if (access) appendAccessAudit(db, access, {
         status: 200, patientIds: records.map(({ patientId }) => patientId), claimRecordIds: records.map(({ id }) => id),
       });
       return result;
     }, Boolean(access)),
-    previewConfirmation: (patientId: string, access?: AuditAccess) => transaction(db, () => {
-      const result = claims.preview(patientForClaim(patientId), revisionNow());
+    previewConfirmation: (patientId: string, access?: AuditAccess, month = DEMO_MONTH) => transaction(db, () => {
+      const result = claims.preview(patientForClaim(patientId), revisionNow(), month);
       if (access) appendAccessAudit(db, access, { status: 200, patientIds: [patientId] });
       return result;
     }, Boolean(access)),
-    listClaimRecords: (query: string, before: number | null, access: AuditAccess) => transaction(db, () => {
-      const page = claims.list(query, before);
+    listClaimRecords: (query: string, before: number | null, access: AuditAccess, month: string | null = null) => transaction(db, () => {
+      const page = claims.list(query, before, month);
       appendAccessAudit(db, access, {
         status: 200, patientIds: [...new Set(page.records.map(({ patientId }) => patientId))],
         claimRecordIds: page.records.map(({ id }) => id),
@@ -297,23 +327,23 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       let affectedPatientIds: string[];
       if (action.type === 'finalize') {
         const patient = patientForClaim(action.patientId);
-        claimRecord = claims.finalize(patient, revision, action.reviewHash, action.correctionReason, actor);
+        claimRecord = claims.finalize(patient, revision, action.reviewHash, action.correctionReason, actor, action.month);
         const calc = claimRecord.snapshot.calculation;
         record(db, 'BILLING_UPDATE', patient.chartNumber,
-          `デモ会計確定: 総点数 ${calc.totalPoints}点 / 窓口負担 ${calc.copayRoundedYen}円（第${claimRecord.version}版）`);
+          `デモ会計確定 ${claimRecord.month}: 総点数 ${calc.totalPoints}点 / 窓口負担 ${calc.copayRoundedYen}円（第${claimRecord.version}版）`);
         affectedPatientIds = [patient.id];
       } else {
         affectedPatientIds = applyAction(db, clinical, action);
         if (action.type === 'register' || action.type === 'update' || action.type === 'fix' || action.type === 'batchFix') {
           claims.noteEdit(affectedPatientIds, {
             actor: actor ?? { kind: 'anonymous' }, at: new Date().toISOString(),
-          });
+          }, 'month' in action ? action.month : undefined);
         }
       }
       db.exec('UPDATE workspace SET revision = revision + 1 WHERE id = 1');
       const workspace = workspaceFromDb(db, dataExportsEnabled);
-      const exported = action.type === 'exportCsv' ? claims.latestForExport() : [];
-      const claim = action.type === 'exportCsv' ? claimPreview(exported, workspace.revision) : undefined;
+      const exported = action.type === 'exportCsv' ? claims.latestForExport(action.month) : [];
+      const claim = action.type === 'exportCsv' ? claimPreview(exported, workspace.revision, action.month) : undefined;
       if (access) appendAccessAudit(db, access, {
         status: 200, affectedPatientIds,
         patientIds: [...new Set([...workspace.patients.map(({ id }) => id), ...exported.map(({ patientId }) => patientId)])],
@@ -321,9 +351,9 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       });
       return { workspace, claim, claimRecord };
     }, true),
-    readMasters: (kind: 'b' | 's' | null, importId: number | null, query: string, access: AuditAccess) =>
+    readMasters: (kind: 'b' | 's' | null, importId: number | null, query: string, access: AuditAccess, date = DEMO_DATE) =>
       transaction(db, () => {
-        const result = kind ? clinical.search(kind, query)
+        const result = kind ? clinical.search(kind, query, date)
           : importId === null ? masters.list() : masters.search(importId, query);
         appendAccessAudit(db, access, { status: 200, masterImportId: importId ?? undefined });
         return result;
@@ -360,6 +390,26 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
       const result = inbox.match(seq, patientId, chartNumber, access.actor.userId);
       appendAccessAudit(db, access, { status: 200, integrationIds: [result.integrationId], patientIds: [patientId] });
       return result;
+    }, true),
+    previewDencalDraft: (seq: number, access: AuditAccess) => transaction(db, () => {
+      const { entry, patient, review } = reviewDencal(seq);
+      appendAccessAudit(db, access, { status: 200, integrationIds: [entry.integrationId], patientIds: [patient.id] });
+      return review;
+    }, true),
+    applyDencalDraft: (seq: number, reviewHash: string, access: AuditAccess) => transaction(db, () => {
+      if (access.actor.kind !== 'authenticated') throw new WorkspaceError(403, '職員IDでログインしてください。');
+      const { entry, patient, review, draft } = reviewDencal(seq);
+      if (reviewHash !== review.reviewHash) throw new WorkspaceError(409, '確認時から内容が変わりました。差分を確認し直してください。');
+      const at = new Date().toISOString();
+      db.prepare(`INSERT INTO dencal_draft_applications(inbox_seq, patient_id, applied_by, applied_at, draft)
+        VALUES (?,?,?,?,?)`).run(seq, patient.id, access.actor.userId, at, JSON.stringify(draft));
+      for (const { month } of review.months) claims.noteEdit([patient.id], { actor: access.actor, at }, month);
+      db.exec('UPDATE workspace SET revision = revision + 1 WHERE id = 1');
+      record(db, 'BILLING_UPDATE', patient.chartNumber, `DENCAL第${entry.transferRevision}版を下書きに反映`);
+      appendAccessAudit(db, access, {
+        status: 200, integrationIds: [entry.integrationId], patientIds: [patient.id], affectedPatientIds: [patient.id],
+      });
+      return inbox.detail(seq);
     }, true),
     recordAccess: (access: AuditAccess, status: number) =>
       transaction(db, () => appendAccessAudit(db, access, { status }), true),

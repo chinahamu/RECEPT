@@ -5,10 +5,10 @@ import type { InboxDetail, InboxIssue, InboxPage, InboxRecord, IntegrationReceip
 import type { clinicalMasters } from './clinicalMasters';
 import { WorkspaceError } from './errors';
 
-type Message = IntegrationSource & {
+export type Message = IntegrationSource & {
   integrationId: string; patientId: string; encounterId: string; transferRevision: number; chartRevision: number;
   event: InboxRecord['event']; visitDate: string; reason: string | null;
-  diagnoses: InboxDetail['diagnoses']; performances: InboxDetail['performances'];
+  diagnoses: (InboxDetail['diagnoses'][number] & { isMain: boolean; outcome: 'ongoing' | 'cured' | 'discontinued' | 'transferred' | 'unknown' })[]; performances: InboxDetail['performances'];
 };
 type InboxRow = Record<string, SQLOutputValue> & {
   seq: number; facility_id: string; sender_id: string; integration_id: string; patient_source_id: string;
@@ -85,6 +85,9 @@ export function dencalInbox(db: DatabaseSync, masters: Masters) {
   }
 
   function recheck(current: Decoded, inbox: EvaluatedEntry[]): IntegrationReceipt {
+    if (db.prepare('SELECT 1 FROM dencal_draft_applications WHERE inbox_seq = ?').get(current.row.seq)) {
+      return { integrationId: current.message.integrationId, bodySha256: current.row.body_sha256, status: 'applied', issues: [] };
+    }
     const result = evaluate(current.row.body, current.message, inbox);
     if (result.httpStatus === 202 && 'issues' in result.body) {
       return evaluatedReceipt(current, result.body.issues);
@@ -112,10 +115,14 @@ export function dencalInbox(db: DatabaseSync, masters: Masters) {
       receipt: recheck(current, previous(message)), patient: patient ?? null };
   }
 
-  function detail(seq: number): InboxDetail {
+  function source(seq: number) {
     const row = bySeq.get(seq) as InboxRow | undefined;
     if (!row) throw new WorkspaceError(404, '受信データが見つかりません。');
-    const current = decode(row);
+    return decode(row);
+  }
+
+  function detail(seq: number): InboxDetail {
+    const current = source(seq);
     const { diagnoses, performances, reason } = current.message;
     return { ...review(current), reason,
       diagnoses: diagnoses.map(({ id, code, startDate, isSuspected }) => ({ id, code, startDate, isSuspected })),
@@ -167,6 +174,7 @@ export function dencalInbox(db: DatabaseSync, masters: Masters) {
       return { records, nextBefore: rows.length > 25 ? records.at(-1)!.seq : null };
     },
     detail,
+    source,
     match(seq: number, patientId: string, chartNumber: string, staffId: string) {
       const current = detail(seq);
       if (current.patient && current.patient.id !== patientId) {

@@ -2,7 +2,10 @@ import { z } from 'zod';
 
 const text = z.string().min(1).max(250);
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
-const date = z.iso.date();
+export const date = z.iso.date();
+export const month = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+export const reviewHash = z.string().regex(/^[0-9a-f]{64}$/);
+const selectedMonth = month.optional();
 const diagnosis = z.object({
   id,
   diseaseCode: z.string().regex(/^\d{7}$/),
@@ -61,14 +64,15 @@ export const requestSchema = z.object({
   revision: z.number().int().nonnegative(),
   action: z.discriminatedUnion('type', [
     z.object({ type: z.literal('register'), patient }),
-    z.object({ type: z.literal('update'), patientId: id, diagnoses, billingItems, summary: z.string().min(1).max(2500) }),
+    z.object({ type: z.literal('update'), patientId: id, month: selectedMonth, diagnoses, billingItems, summary: z.string().min(1).max(2500) }),
     z.object({
-      type: z.literal('finalize'), patientId: id,
-      reviewHash: z.string().regex(/^[0-9a-f]{64}$/),
+      type: z.literal('finalize'), patientId: id, month: selectedMonth,
+      reviewHash,
       correctionReason: z.string().trim().min(1).max(1000).optional(),
     }),
-    z.object({ type: z.literal('fix'), patientId: id, findingId: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/) }),
-    z.object({ type: z.literal(['batchFix', 'toggleOffline', 'reset', 'exportCsv', 'snapshot']) }),
+    z.object({ type: z.literal('fix'), patientId: id, month: selectedMonth, findingId: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/) }),
+    z.object({ type: z.literal(['batchFix', 'exportCsv']), month: selectedMonth }),
+    z.object({ type: z.literal(['toggleOffline', 'reset', 'snapshot']) }),
   ]),
 });
 
