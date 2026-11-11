@@ -12,7 +12,7 @@ import type { ValidRequest } from './validation';
 import { WorkspaceError } from './errors';
 import { officialMasters } from './officialMasters';
 import { clinicalMasters } from './clinicalMasters';
-import { protectedDatabasePath } from './databaseFiles';
+import { protectedDatabasePath, RECEPT_APPLICATION_ID, RECEPT_SCHEMA_VERSIONS } from './databaseFiles';
 import { claimRecords } from './claimRecords';
 import type { ClaimRecord } from '../src/types/claimRecord';
 import { appendAccessAudit, type AuditAccess } from './accessAudit';
@@ -213,9 +213,9 @@ export function openWorkspace(path?: string, dataExportsEnabled = process.env.RE
   try {
     db.exec('PRAGMA busy_timeout = 3000; PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY; PRAGMA secure_delete = ON');
     transaction(db, () => {
-      const version = db.prepare('PRAGMA user_version').get()?.user_version;
-      if (db.prepare('PRAGMA application_id').get()?.application_id !== 0x52435054 ||
-          (version !== 1 && version !== 2 && version !== 3 && version !== 4)) {
+      const version = Number(db.prepare('PRAGMA user_version').get()?.user_version);
+      if (db.prepare('PRAGMA application_id').get()?.application_id !== RECEPT_APPLICATION_ID ||
+          !RECEPT_SCHEMA_VERSIONS.includes(version)) {
         throw new WorkspaceError(503, '未対応のSQLiteスキーマです。RECEPT用DBを指定してください。');
       }
       if (version === 1) db.exec(readFileSync(new URL('../database/002-official-masters.sql', import.meta.url), 'utf8'));
