@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { AuditAccess, AuditActor } from './accessAudit';
+import type { AuditAccess } from './accessAudit';
+import { z } from 'zod';
+import { hasStaffRole, type Staff, type StaffRole } from '../src/types/staff';
+import type { Workspace, WorkspaceAction } from '../src/types/workspace';
+import { sessionCookie, staffSessions } from './staffSessions';
 import { isSameOriginApiRequest, protectedResponseHeaders } from './browserProtection';
 import { requestSchema } from './validation';
 import { openWorkspace } from './workspace';
@@ -9,6 +13,20 @@ import { masterFileParams } from './officialMasters';
 import { MASTER_MAX_BYTES } from '../src/data/officialMasters';
 
 const maxBodyBytes = 4 * 1024 * 1024;
+const credentialsSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+  password: z.string().min(1).max(256),
+});
+
+const actionRoles: Record<WorkspaceAction['type'], StaffRole> = {
+  register: 'reception', update: 'physician', fix: 'physician', batchFix: 'physician',
+  finalize: 'physician', toggleOffline: 'admin', reset: 'admin', exportCsv: 'admin', snapshot: 'admin',
+};
+
+function visibleWorkspace(workspace: Workspace, staff: Staff): Workspace {
+  return hasStaffRole(staff, 'admin') ? workspace : { ...workspace, activity: [], dataExportsEnabled: false };
+}
+
 
 async function readBody(req: IncomingMessage, limit: number) {
   const chunks: Buffer[] = [];
@@ -25,20 +43,18 @@ async function readBody(req: IncomingMessage, limit: number) {
   return Buffer.concat(chunks);
 }
 
-async function readAction(req: IncomingMessage) {
+async function readJson(req: IncomingMessage, limit: number) {
   if (req.headers['content-type']?.split(';')[0].trim() !== 'application/json') {
     throw new WorkspaceError(415, 'JSON形式で送信してください。');
   }
-  const bytes = await readBody(req, maxBodyBytes);
+  const bytes = await readBody(req, limit);
   let value: unknown;
   try {
     value = JSON.parse(bytes.toString('utf8'));
   } catch {
     throw new WorkspaceError(400, 'JSONを読み込めません。');
   }
-  const parsed = requestSchema.safeParse(value);
-  if (!parsed.success) throw new WorkspaceError(400, '入力形式が正しくありません。');
-  return parsed.data;
+  return value;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
@@ -49,27 +65,33 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+type VerifiedSession = { staff: Staff; sessionId: string; loginAt: string; expiresAt: number };
+
 export function createWorkspaceApi(
   open = openWorkspace,
-  // Only a server-side authenticator may supply a verified actor.
-  resolveActor: (req: IncomingMessage) => AuditActor | Promise<AuditActor> = () => ({ kind: 'anonymous' }),
+  resolveVerifiedSession?: (req: IncomingMessage) => VerifiedSession | null | Promise<VerifiedSession | null>,
 ) {
   let store: ReturnType<typeof openWorkspace> | undefined;
+  const sessions = staffSessions();
+  let failedLogins = 0;
+  let loginWindowEnds = 0;
   return {
     close() {
+      sessions.clear();
       store?.close();
       store = undefined;
     },
     middleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
       const path = req.url?.split('?')[0];
-      if (path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview' &&
+      const isSession = path === '/api/session' || path === '/api/login' || path === '/api/logout';
+      if (!isSession && path !== '/api/official-masters' && path !== '/api/workspace' && path !== '/api/claim-preview' &&
           path !== '/api/claim-records') return next();
 
       const access: AuditAccess = {
         requestId: randomUUID(),
         requestedAt: new Date().toISOString(),
         actor: { kind: 'anonymous' },
-        resource: path === '/api/official-masters' ? 'official-masters'
+        resource: isSession ? 'session' : path === '/api/official-masters' ? 'official-masters'
           : path === '/api/workspace' ? 'workspace' : path === '/api/claim-records' ? 'claim-records' : 'claim-preview',
         operation: req.method === 'GET' ? 'read' : req.method === 'POST' ? 'write' : 'unsupported-method',
       };
@@ -79,10 +101,67 @@ export function createWorkspaceApi(
           throw new WorkspaceError(403, 'このデモAPIは同じPCから利用してください。');
         }
 
-        const actor = await resolveActor(req);
-        if (actor.kind === 'authenticated') {
-          access.actor = { kind: actor.kind, userId: actor.userId, loginAt: actor.loginAt };
+        store ??= open();
+        const currentStore = store;
+        const identify = async () => {
+          const session = resolveVerifiedSession ? await resolveVerifiedSession(req) : sessions.get(req, currentStore.accounts.active);
+          const displayedSession = req.headers['x-recept-session'];
+          if (displayedSession !== undefined && displayedSession !== session?.sessionId) {
+            throw new WorkspaceError(401, 'ログイン中の職員が変わりました。もう一度ログインしてください。');
+          }
+          if (session) access.actor = { kind: 'authenticated', userId: session.staff.id, loginAt: session.loginAt };
+          return session;
+        };
+        const requireRole = async (minimum: StaffRole) => {
+          const session = await identify();
+          if (!session) throw new WorkspaceError(401, '職員IDでログインしてください。');
+          if (!hasStaffRole(session.staff, minimum)) throw new WorkspaceError(403, 'この操作を行う職種の権限がありません。');
+          return session;
+        };
+
+        if (isSession) {
+          access.operation = path === '/api/login' ? 'login' : path === '/api/logout' ? 'logout' : 'session';
+          const method = path === '/api/session' ? 'GET' : 'POST';
+          if (req.method !== method) {
+            res.setHeader('Allow', method);
+            throw new WorkspaceError(405, '未対応の操作です。');
+          }
+          if (path === '/api/login') {
+            const input = credentialsSchema.safeParse(await readJson(req, 4096));
+            if (!input.success) throw new WorkspaceError(400, '職員IDとパスワードを入力してください。');
+            const now = Date.now();
+            if (now >= loginWindowEnds) {
+              failedLogins = 0;
+              loginWindowEnds = now + 60_000;
+            }
+            if (failedLogins >= 10) {
+              res.setHeader('Retry-After', String(Math.ceil((loginWindowEnds - now) / 1000)));
+              throw new WorkspaceError(429, 'ログイン試行回数の上限です。しばらくしてから再試行してください。');
+            }
+            const account = currentStore.accounts.authenticate(input.data.id, input.data.password);
+            if (!account) {
+              failedLogins++;
+              throw new WorkspaceError(401, '職員IDまたはパスワードが正しくありません。');
+            }
+            access.actor = { kind: 'authenticated', userId: account.id, loginAt: new Date(now).toISOString() };
+            currentStore.recordAccess(access, 200);
+            const { token, sessionId, expiresAt } = sessions.create(account, req, now);
+            res.setHeader('Set-Cookie', sessionCookie(req, token));
+            sendJson(res, 200, { staff: { id: account.id, role: account.role }, sessionId, expiresAt });
+          } else if (path === '/api/logout') {
+            await identify();
+            sessions.revoke(req);
+            res.setHeader('Set-Cookie', sessionCookie(req));
+            currentStore.recordAccess(access, 200);
+            sendJson(res, 200, { staff: null });
+          } else {
+            const session = await requireRole('reception');
+            sendJson(res, 200, { staff: session.staff, sessionId: session.sessionId, expiresAt: session.expiresAt });
+          }
+          return;
         }
+
+        const { staff } = await requireRole('reception');
         if (access.resource === 'official-masters') {
           const params = new URLSearchParams(req.url?.split('?')[1]);
           if (req.method === 'GET') {
@@ -94,18 +173,19 @@ export function createWorkspaceApi(
                 (importId !== null && (!Number.isSafeInteger(id) || id < 1))) {
               throw new WorkspaceError(400, 'マスターの検索条件が正しくありません。');
             }
-            store ??= open();
             access.operation = kind ? 'search-clinical-master' : importId === null ? 'list-masters' : 'search-master';
-            sendJson(res, 200, store.readMasters(kind, importId === null ? null : id, query, access));
+            if (!kind) await requireRole('admin');
+            sendJson(res, 200, currentStore.readMasters(kind, importId === null ? null : id, query, access));
           } else if (req.method === 'POST') {
             access.operation = 'import-master';
+            await requireRole('admin');
             if (req.headers['content-type'] !== 'application/octet-stream') {
               throw new WorkspaceError(415, '解凍したマスターファイルを送信してください。');
             }
             const file = masterFileParams(params.get('filename') ?? '', params.get('publishedOn') ?? '');
             const bytes = await readBody(req, MASTER_MAX_BYTES);
-            store ??= open();
-            sendJson(res, 200, store.importMaster(file, bytes, access));
+            await requireRole('admin');
+            sendJson(res, 200, currentStore.importMaster(file, bytes, access));
           } else {
             res.setHeader('Allow', 'GET, POST');
             throw new WorkspaceError(405, '未対応の操作です。');
@@ -125,25 +205,35 @@ export function createWorkspaceApi(
               ((patientId !== null || id !== null) && (query || before !== null))) {
             throw new WorkspaceError(400, '請求記録の照会条件が正しくありません。');
           }
-          store ??= open();
+          access.operation = patientId ? 'review-claim-draft' : id
+            ? (exportMode ? 'export-claim-record' : 'read-claim-record') : 'list-claim-records';
+          await requireRole(exportMode ? 'admin' : 'physician');
           if (patientId) {
-            access.operation = 'review-claim-draft';
-            sendJson(res, 200, store.previewConfirmation(patientId, access));
+            sendJson(res, 200, currentStore.previewConfirmation(patientId, access));
           } else if (id) {
-            access.operation = exportMode ? 'export-claim-record' : 'read-claim-record';
-            sendJson(res, 200, store.readClaimRecord(id, access, exportMode === '1'));
+            sendJson(res, 200, currentStore.readClaimRecord(id, access, exportMode === '1'));
           } else {
-            access.operation = 'list-claim-records';
-            sendJson(res, 200, store.listClaimRecords(query, before === null ? null : Number(before), access));
+            sendJson(res, 200, currentStore.listClaimRecords(query, before === null ? null : Number(before), access));
           }
         } else if (req.method === 'GET') {
-          store ??= open();
-          sendJson(res, 200, path === '/api/claim-preview' ? store.preview(access) : store.read(access));
+          if (path === '/api/claim-preview') {
+            await requireRole('admin');
+            sendJson(res, 200, currentStore.preview(access));
+          } else {
+            sendJson(res, 200, visibleWorkspace(currentStore.read(access), staff));
+          }
         } else if (req.method === 'POST' && path === '/api/workspace') {
-          const action = await readAction(req);
-          access.operation = action.action.type;
-          store ??= open();
-          sendJson(res, 200, store.apply(action, access));
+          const action = requestSchema.safeParse(await readJson(req, maxBodyBytes));
+          if (!action.success) throw new WorkspaceError(400, '入力形式が正しくありません。');
+          access.operation = action.data.action.type;
+          const current = await requireRole(actionRoles[action.data.action.type]);
+          const requested = action.data.action;
+          if (requested.type === 'register' && (requested.patient.diagnoses.length || requested.patient.billingItems.length) &&
+              !hasStaffRole(current.staff, 'physician')) {
+            throw new WorkspaceError(403, '診療・算定情報の入力には医師以上の権限が必要です。');
+          }
+          const result = currentStore.apply(action.data, access);
+          sendJson(res, 200, { ...result, workspace: visibleWorkspace(result.workspace, current.staff) });
         } else {
           res.setHeader('Allow', path === '/api/workspace' ? 'GET, POST' : 'GET');
           throw new WorkspaceError(405, '未対応の操作です。');
@@ -152,7 +242,7 @@ export function createWorkspaceApi(
         const status = error instanceof WorkspaceError ? error.status : 500;
         try {
           store ??= open();
-          store.recordFailure(access, status);
+          store.recordAccess(access, status);
         } catch {
           console.error(JSON.stringify({
             event: 'access-audit-unavailable', requestId: access.requestId, at: new Date().toISOString(),

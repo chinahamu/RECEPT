@@ -9,7 +9,7 @@ export type AuditAccess = {
   requestId: string;
   requestedAt: string;
   actor: AuditActor;
-  resource: 'workspace' | 'claim-preview' | 'claim-records' | 'official-masters';
+  resource: 'workspace' | 'claim-preview' | 'claim-records' | 'official-masters' | 'session';
   operation: string;
 };
 

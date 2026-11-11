@@ -26,6 +26,7 @@ interface EncounterWorkstationProps {
   onSelectPatient: (id: string) => void;
   onUpdatePatient: (updated: PatientRecord, logSummary: string) => Promise<boolean>;
   onApplyAutoFix: (patientId: string, findingId: string) => void;
+  canEdit: boolean;
   onReviewClaim: (patientId: string) => void;
   isOfflineMode: boolean;
 }
@@ -37,6 +38,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
   onUpdatePatient,
   onApplyAutoFix,
   onReviewClaim,
+  canEdit,
   isOfflineMode,
 }) => {
   const [patientQuery, setPatientQuery] = useState('');
@@ -397,6 +399,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                         </td>
                         <td className="py-2 px-2">
                           <select
+                            disabled={!canEdit}
                             aria-label={`${diag.diseaseName}の転帰`}
                             value={diag.outcome}
                             onChange={(e) =>
@@ -415,6 +418,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                         <td className="py-2 px-2 text-right">
                           <button
                             type="button"
+                            disabled={!canEdit}
                             onClick={() => handleRemoveDiagnosis(diag.id, diag.diseaseName)}
                             aria-label={`傷病名「${diag.diseaseName}」を削除`}
                             className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
@@ -461,7 +465,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
               </label>
               <button
                 type="submit"
-                disabled={!selectedDisease}
+                disabled={!canEdit || !selectedDisease}
                 className="disabled:opacity-50 px-3 py-1.5 bg-slate-900 text-white text-xs font-medium rounded-md hover:bg-slate-800 transition-colors inline-flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -534,6 +538,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             />
                             <button
                               type="button"
+                              disabled={!canEdit}
                               onClick={() => handleSaveComment(item.id)}
                               className="px-2 py-1 bg-slate-900 text-white rounded text-xs whitespace-nowrap"
                             >
@@ -543,6 +548,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                         ) : (
                           <button
                             type="button"
+                            disabled={!canEdit}
                             onClick={() => {
                               setEditingCommentItemId(item.id);
                               setCommentInputText(item.commentText || '');
@@ -563,6 +569,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             type="number"
                             min={1}
                             max={90}
+                            disabled={!canEdit}
                             aria-label={`${item.name}の数量`}
                             key={item.quantity}
                             defaultValue={item.quantity}
@@ -575,6 +582,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                             type="number"
                             min={1}
                             max={90}
+                            disabled={!canEdit}
                             aria-label={`${item.name}の日数または回数`}
                             key={item.days}
                             defaultValue={item.days}
@@ -593,6 +601,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                       <td className="py-2.5 px-2 text-right">
                         <button
                           type="button"
+                          disabled={!canEdit}
                           onClick={() => handleRemoveBillingItem(item.id, item.name)}
                           aria-label={`算定項目「${item.name}」を削除`}
                           className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
@@ -631,6 +640,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                 <button
                   key={proc.code}
                   type="button"
+                  disabled={!canEdit}
                   onClick={() => handleAddBillingItem(proc.code)}
                   className="text-left p-2 border border-slate-200 rounded-md hover:border-slate-900 hover:bg-slate-50 transition-colors flex items-center justify-between gap-2"
                 >
@@ -728,6 +738,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
 
           <button
             type="button"
+            disabled={!canEdit}
             onClick={() => onReviewClaim(selectedPatient.id)}
             className="mt-3 w-full py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-md transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
           >
@@ -806,7 +817,7 @@ export const EncounterWorkstation: React.FC<EncounterWorkstationProps> = ({
                       根拠通知: {finding.mhlwReference}
                     </div>
 
-                    {finding.fixAction && (
+                    {canEdit && finding.fixAction && (
                       <div className="pt-1">
                         <button
                           type="button"
