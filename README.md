@@ -35,7 +35,7 @@ DENCALと同じく、React／TypeScriptの画面、Node.js／TypeScriptのサー
 
 `db:init` は `data/recept.sqlite3` を作成し、既存ファイルの上書きを拒否します。サンプル患者は初回のAPIアクセス時に投入します。別のDBを使う場合は `npm run db:init -- data/another.sqlite3` で作成し、起動時に環境変数 `RECEPT_DB` に同じパスを指定します。
 
-この開発版は同じPCからの利用を前提としています。オフライン切替は資格情報の表示を確認するためのデモです。点検・算定・CSVは操作確認用です。認証と正式な算定・請求仕様への対応は今後進めます。
+この開発版は同じPCからの利用を前提としています。CSV・JSONの出力は既定で無効です。[開発時のデータ保護](docs/development-data-protection.md)に出力の有効化とDBファイルの保管条件をまとめています。オフライン切替は資格情報の表示を確認するためのデモです。点検・算定・CSVは操作確認用です。認証と正式な算定・請求仕様への対応は今後進めます。
 
 ```sh
 npm run lint

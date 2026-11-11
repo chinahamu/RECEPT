@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { protectedDatabasePath } from './databaseFiles';
 import { readAccessAudit, verifyAccessAudit } from './accessAudit';
 
 function integer(value: string, minimum: number, maximum = Number.MAX_SAFE_INTEGER) {
@@ -15,7 +16,7 @@ function main(args: string[]) {
     throw new Error('使い方: npm run audit -- review [前回の連番] [最大件数] または verify [連番:ハッシュ]');
   }
 
-  const db = new DatabaseSync(process.env.RECEPT_DB || 'data/recept.sqlite3', { readOnly: true });
+  const db = new DatabaseSync(protectedDatabasePath(), { readOnly: true });
   try {
     db.exec('PRAGMA busy_timeout = 3000');
     if (db.prepare('PRAGMA application_id').get()?.application_id !== 0x52435054 ||

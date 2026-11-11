@@ -20,7 +20,7 @@ interface LocalServerMasterViewProps {
   onImported: (kind: MasterKind) => void;
   onToggleOfflineMode: () => void;
   onResetDemoData: () => void;
-  onCreateSnapshot: () => Promise<Workspace | undefined>;
+  onCreateSnapshot?: () => Promise<Workspace | undefined>;
 }
 
 export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
@@ -34,7 +34,7 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
   const [snapshotMessage, setSnapshotMessage] = useState<string | null>(null);
 
   const handleDownloadSnapshot = async () => {
-    const snapshot = await onCreateSnapshot();
+    const snapshot = await onCreateSnapshot?.();
     if (!snapshot) return;
     const payload = {
       exportedAt: new Date().toISOString(),
@@ -99,14 +99,16 @@ export const LocalServerMasterView: React.FC<LocalServerMasterViewProps> = ({
               )}
             </button>
 
-            <button
-              type="button"
-              onClick={handleDownloadSnapshot}
-              className="px-3.5 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-900 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-            >
-              <Download className="w-4 h-4" />
-              <span>デモスナップショット出力 (JSON)</span>
-            </button>
+            {onCreateSnapshot && (
+              <button
+                type="button"
+                onClick={handleDownloadSnapshot}
+                className="px-3.5 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-900 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              >
+                <Download className="w-4 h-4" />
+                <span>デモスナップショット出力 (JSON)</span>
+              </button>
+            )}
 
             <button
               type="button"

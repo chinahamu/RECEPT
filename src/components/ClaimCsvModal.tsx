@@ -5,7 +5,7 @@ import type { ClaimPreview } from '../types/workspace';
 interface ClaimCsvModalProps {
   claim: ClaimPreview;
   onClose: () => void;
-  onExport: () => Promise<ClaimPreview | undefined>;
+  onExport: (destination: 'clipboard' | 'file') => Promise<ClaimPreview | undefined>;
   busy: boolean;
   error: string;
 }
@@ -14,7 +14,7 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   const handleCopy = async () => {
-    const output = await onExport();
+    const output = await onExport('clipboard');
     if (!output) return;
     try {
       await navigator.clipboard.writeText(output.csv);
@@ -26,7 +26,7 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
   };
 
   const handleDownloadCsv = async () => {
-    const output = await onExport();
+    const output = await onExport('file');
     if (!output) return;
     const blob = new Blob([output.csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);

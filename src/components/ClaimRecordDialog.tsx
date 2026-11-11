@@ -9,11 +9,11 @@ type Props = {
   busy: boolean;
   error: string;
 } & (
-  | { record: ClaimRecord; confirmation?: never; onConfirm?: never }
-  | { record?: never; confirmation: ClaimConfirmation; onConfirm: (reason?: string) => void }
+  | { record: ClaimRecord; confirmation?: never; onConfirm?: never; onExport?: () => Promise<ClaimRecord | undefined> }
+  | { record?: never; confirmation: ClaimConfirmation; onConfirm: (reason?: string) => void; onExport?: never }
 );
 
-export function ClaimRecordDialog({ record, confirmation, onConfirm, onClose, busy, error }: Props) {
+export function ClaimRecordDialog({ record, confirmation, onConfirm, onExport, onClose, busy, error }: Props) {
   const [reason, setReason] = useState('');
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
@@ -24,12 +24,13 @@ export function ClaimRecordDialog({ record, confirmation, onConfirm, onClose, bu
   const correction = Boolean(previous);
   const title = record ? `確定記録 第${record.version}版` : correction ? '訂正内容の確認' : '請求記録の確定内容を確認';
 
-  function download() {
-    if (!record) return;
-    const url = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' }));
+  async function download() {
+    const exported = await onExport?.();
+    if (!exported) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = `recept-demo-claim-${record.id}.json`;
+    link.download = `recept-demo-claim-${exported.id}.json`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -85,7 +86,10 @@ export function ClaimRecordDialog({ record, confirmation, onConfirm, onClose, bu
           {record.correctionReason && <p className="whitespace-pre-wrap break-words">訂正理由 {record.correctionReason}</p>}
           <p className="break-all">記録ID {record.id}</p>
           <p className="break-all">SHA-256 {record.sha256}</p>
-          <button type="button" onClick={download} className="mt-2 rounded-md border border-slate-300 px-3 py-2">確定記録のJSONを保存</button>
+          {onExport && (
+            <button type="button" onClick={download} disabled={busy}
+              className="mt-2 rounded-md border border-slate-300 px-3 py-2 disabled:opacity-50">確定記録のJSONを保存</button>
+          )}
         </div>
       )}
       {confirmation && (

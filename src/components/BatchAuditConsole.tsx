@@ -15,7 +15,7 @@ interface BatchAuditConsoleProps {
   patients: PatientView[];
   onApplyAutoFix: (patientId: string, findingId: string) => void;
   onBatchAutoFixAll: () => void;
-  onOpenClaimCsv: () => void;
+  onOpenClaimCsv?: () => void;
   onNavigateToWorkstation: (patientId: string) => void;
 }
 
@@ -211,14 +211,16 @@ export const BatchAuditConsole: React.FC<BatchAuditConsoleProps> = ({
               <span>全件のエラー・警告を一括自動補正</span>
             </button>
           )}
-          <button
-            type="button"
-            onClick={onOpenClaimCsv}
-            className="px-3.5 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-900 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-          >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>デモ請求CSVプレビュー</span>
-          </button>
+          {onOpenClaimCsv && (
+            <button
+              type="button"
+              onClick={onOpenClaimCsv}
+              className="px-3.5 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-900 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>デモ請求CSVプレビュー</span>
+            </button>
+          )}
         </div>
       </div>
 

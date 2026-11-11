@@ -8,4 +8,7 @@ coverage/
 !.env.example
 /data/
 *.sqlite3*
+recept-demo-claims.csv
+recept-demo-claim-*.json
+recept-demo-snapshot-*.json
 __pycache__/
