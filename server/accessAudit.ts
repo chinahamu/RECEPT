@@ -9,7 +9,7 @@ export type AuditAccess = {
   requestId: string;
   requestedAt: string;
   actor: AuditActor;
-  resource: 'workspace' | 'claim-preview' | 'official-masters';
+  resource: 'workspace' | 'claim-preview' | 'claim-records' | 'official-masters';
   operation: string;
 };
 
@@ -17,6 +17,7 @@ type AuditResult = {
   status: number;
   patientIds?: string[];
   affectedPatientIds?: string[];
+  claimRecordIds?: string[];
   masterImportId?: number;
   duplicate?: boolean;
 };

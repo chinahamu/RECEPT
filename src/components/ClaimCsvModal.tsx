@@ -51,7 +51,7 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
               デモ請求CSV 出力プレビュー
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              架空データで請求内容を確認するためのCSVです。保険請求への使用はできません。
+              確定済みの最新版を出力します。架空データ専用で、保険請求には使用できません。
             </p>
           </div>
           <button
@@ -64,11 +64,13 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
           </button>
         </div>
 
-        {claim.errorCount > 0 ? (
+        {claim.patientCount === 0 ? (
+          <p className="text-xs text-slate-600">この診療月の確定記録はありません。会計・診療入力で確定してください。</p>
+        ) : claim.errorCount > 0 ? (
           <div className="p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-900 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
             <span>
-              現在、未解決の要修正エラーが <strong className="font-mono tabular-nums">{claim.errorCount}</strong> 件残っています。「レセプト自動点検」画面で内容を確認できます。
+              確定時のデモ点検で要修正エラーが <strong className="font-mono tabular-nums">{claim.errorCount}</strong> 件残っています。請求確定記録で内容を確認できます。
             </span>
           </div>
         ) : (
@@ -97,7 +99,7 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
             <button
               type="button"
               onClick={handleCopy}
-              disabled={busy}
+              disabled={busy || claim.patientCount === 0}
               className="px-3.5 py-2 border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-medium rounded-md inline-flex items-center gap-1.5"
             >
               <Copy className="w-4 h-4" />
@@ -106,7 +108,7 @@ export const ClaimCsvModal: React.FC<ClaimCsvModalProps> = ({ claim, onClose, on
             <button
               type="button"
               onClick={handleDownloadCsv}
-              disabled={busy}
+              disabled={busy || claim.patientCount === 0}
               className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-md inline-flex items-center gap-1.5"
             >
               <Download className="w-4 h-4" />

@@ -1,3 +1,4 @@
+import type { ClaimRecord } from './claimRecord';
 import type { MasterKind } from '../data/officialMasters';
 import type {
   AuditFinding, BillingLineItem, LocalActivityEntry, PatientDiagnosis,
@@ -19,6 +20,7 @@ export interface Workspace {
 }
 
 export interface ClaimPreview {
+  revision: number;
   csv: string;
   patientCount: number;
   errorCount: number;
@@ -27,11 +29,12 @@ export interface ClaimPreview {
 export type WorkspaceAction =
   | { type: 'register'; patient: PatientRecord }
   | { type: 'update'; patientId: string; diagnoses: PatientDiagnosis[]; billingItems: BillingLineItem[]; summary: string }
-  | { type: 'finalize'; patientId: string }
+  | { type: 'finalize'; patientId: string; reviewHash: string; correctionReason?: string }
   | { type: 'fix'; patientId: string; findingId: string }
   | { type: 'batchFix' | 'toggleOffline' | 'reset' | 'exportCsv' | 'snapshot' };
 
 export interface WorkspaceResult {
   workspace: Workspace;
   claim?: ClaimPreview;
+  claimRecord?: ClaimRecord;
 }

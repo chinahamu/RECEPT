@@ -253,8 +253,11 @@ export function applyAutoFixToPatient(
  * 請求画面の操作確認用CSVを生成する
  * レコード識別: IR(医療機関情報), RE(レセプト共通), HO(保険者), SY(傷病名), SI(診療行為), IY(医薬品), CO(コメント), GO(総括)
  */
-export function generateDemoClaimCsv(patients: PatientRecord[]): string {
-  const billingYearMonth = DEMO_MONTH;
+export function generateDemoClaimCsv(
+  patients: (PatientRecord & { calculation?: ReceiptCalculationResult; linePoints?: Record<string, number> })[],
+  facility: Pick<typeof CLINIC_FACILITY_INFO, 'facilityCode' | 'facilityName' | 'prefectureCode' | 'phone'> = CLINIC_FACILITY_INFO,
+  billingYearMonth = DEMO_MONTH,
+): string {
   const lines: string[] = ['DEMO,架空データ専用・請求提出不可'];
   const csvCell = (value: string) => {
     // 表計算ソフトに取り込んだ場合も入力値を式として扱わせない。
@@ -267,21 +270,21 @@ export function generateDemoClaimCsv(patients: PatientRecord[]): string {
     [
       'IR',
       '1', // 審査支払機関 (1:社保/国保共通出力プレビュー)
-      CLINIC_FACILITY_INFO.prefectureCode,
+      facility.prefectureCode,
       '1', // 点数表 (1:医科)
-      CLINIC_FACILITY_INFO.facilityCode.slice(3),
+      facility.facilityCode.slice(3),
       '',
-      CLINIC_FACILITY_INFO.facilityName,
+      facility.facilityName,
       billingYearMonth,
       '00',
-      CLINIC_FACILITY_INFO.phone,
+      facility.phone,
     ].map(csvCell).join(',')
   );
 
   let totalAllPoints = 0;
 
   patients.forEach((pt, idx) => {
-    const calc = calculateReceiptPointsAndCopay(pt);
+    const calc = pt.calculation ?? calculateReceiptPointsAndCopay(pt);
     totalAllPoints += calc.totalPoints;
     const receiptNo = String(idx + 1).padStart(4, '0');
     const sexCode = pt.sex === '男' ? '1' : '2';
@@ -345,7 +348,7 @@ export function generateDemoClaimCsv(patients: PatientRecord[]): string {
           '1', // 負担区分
           item.code,
           String(item.quantity),
-          String(calculateLineItemPoints(item)),
+          String(pt.linePoints?.[item.id] ?? calculateLineItemPoints(item)),
           String(item.days),
           item.name,
         ].map(csvCell).join(',')

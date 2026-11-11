@@ -72,7 +72,14 @@ test('SQLite stores patients, details and activity across a server restart', (t)
     assert.equal(updated.patients[0].billingItems[0].points, firstItem.points);
     assert.equal(updated.patients[0].linePoints[firstItem.id], firstItem.points * 2 * firstItem.days);
 
-    const finalized = store.apply(command(updated.revision, { type: 'finalize', patientId: newPatient.id })).workspace;
+    const preview = store.previewConfirmation(newPatient.id);
+    const result = store.apply(command(preview.revision, {
+      type: 'finalize', patientId: newPatient.id, reviewHash: preview.reviewHash,
+    }));
+    const finalized = result.workspace;
+    assert.deepEqual(result.claimRecord?.snapshot.masters.map(({ kind }) => kind), ['s', 'b']);
+    assert.equal(result.claimRecord?.snapshot.patient.billingItems[0].masterImportId, 1);
+    assert.equal(result.claimRecord?.snapshot.patient.diagnoses[0].masterImportId, 2);
     assert.match(finalized.activity[0].summary, /デモ会計確定.*総点数/);
     const output = store.apply(command(finalized.revision, { type: 'exportCsv' }));
     assert.match(output.claim?.csv ?? '', /^DEMO,.*架空 登録/s);
@@ -230,7 +237,7 @@ test('access audit records API disclosure, changes and failures across reset and
   assert.deepEqual(events[1].affectedPatientIds, [patientId]);
   assert.ok(events[2].patientIds?.includes(patientId));
   assert.ok(events[3].patientIds?.includes(patientId));
-  assert.ok(events[4].patientIds?.includes(patientId));
+  assert.deepEqual(events[4].patientIds, []); // Drafts are excluded from claim CSV.
   assert.equal(events[5].patientIds, undefined);
   assert.ok(events[6].affectedPatientIds?.includes(patientId));
   assert.equal(events[6].patientIds?.includes(patientId), false);
@@ -291,6 +298,111 @@ test('an existing version 2 database is migrated without deleting legacy activit
   }
   const migrated = new DatabaseSync(filename, { readOnly: true });
   t.after(() => migrated.close());
-  assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 3);
+  assert.equal(migrated.prepare('PRAGMA user_version').get()?.user_version, 4);
   assert.deepEqual(readAccessAudit(migrated, 0, 100), []);
+});
+
+
+test('claim confirmation freezes the reviewed version, requires a correction reason and preserves history across reset', async (t) => {
+  const filename = setup(t);
+  const editor = { kind: 'authenticated', userId: 'staff-input', loginAt: '2026-11-11T00:00:00.000Z' } as const;
+  const confirmer = { ...editor, userId: 'staff-confirm' };
+  let actor: typeof editor | typeof confirmer = editor;
+  const api = createWorkspaceApi(() => openWorkspace(filename), () => actor);
+  t.after(api.close);
+  const request = requestApi(api);
+  const patient = INITIAL_PATIENTS[0];
+  const previewUrl = `/api/claim-records?patientId=${patient.id}`;
+  const finalize = (review: { revision: number; reviewHash: string }, correctionReason?: string) =>
+    request('/api/workspace', 'POST', command(review.revision, {
+      type: 'finalize', patientId: patient.id, reviewHash: review.reviewHash, correctionReason,
+    }));
+  const edit = (revision: number, quantity: number) =>
+    request('/api/workspace', 'POST', command(revision, {
+      type: 'update', patientId: patient.id, diagnoses: patient.diagnoses,
+      billingItems: patient.billingItems.map((item, index) => index === 0 ? { ...item, quantity } : item),
+      summary: 'テスト明細の数量変更',
+    }));
+
+  const firstView = (await request(previewUrl, 'GET')).data;
+  assert.equal(firstView.previous, null);
+  assert.equal((await request('/api/claim-preview', 'GET')).data.patientCount, 0);
+  assert.equal((await edit(firstView.revision, 2)).status, 200);
+  const reviewed = (await request(previewUrl, 'GET')).data;
+  actor = confirmer;
+  assert.equal((await finalize(firstView)).status, 409);
+  assert.equal((await finalize({ ...reviewed, reviewHash: '0'.repeat(64) })).status, 409);
+  const first = (await finalize(reviewed)).data.claimRecord;
+  assert.equal(first.version, 1);
+  assert.deepEqual(first.confirmedBy, confirmer);
+  assert.deepEqual(first.enteredBy.actor, editor);
+  assert.deepEqual(first.snapshot, reviewed.snapshot);
+  assert.equal(first.snapshot.patient.notes, undefined);
+  const frozen = (await request('/api/claim-preview', 'GET')).data;
+  assert.equal(frozen.patientCount, 1);
+  const unchanged = (await request(previewUrl, 'GET')).data;
+  assert.equal(unchanged.hasChanges, false);
+  assert.equal((await finalize(unchanged)).status, 409);
+
+  actor = editor;
+  assert.equal((await edit(frozen.revision, 3)).status, 200);
+  assert.equal((await request('/api/claim-preview', 'GET')).data.csv, frozen.csv);
+  const corrected = (await request(previewUrl, 'GET')).data;
+  assert.equal(corrected.hasChanges, true);
+  assert.equal(corrected.previous.id, first.id);
+  actor = confirmer;
+  assert.equal((await finalize(corrected)).status, 400);
+  const second = (await finalize(corrected, '算定数量の訂正')).data.claimRecord;
+  assert.equal(second.version, 2);
+  assert.equal(second.previousId, first.id);
+  assert.equal(second.correctionReason, '算定数量の訂正');
+  const updatedCsv = (await request('/api/claim-preview', 'GET')).data;
+  assert.notEqual(updatedCsv.csv, frozen.csv);
+  assert.equal((await request('/api/workspace', 'POST', command(updatedCsv.revision, { type: 'reset' }))).status, 200);
+  api.close();
+
+  const history = (await request(`/api/claim-records?q=${patient.chartNumber}`, 'GET')).data.records;
+  assert.deepEqual(history.map(({ version }: { version: number }) => version), [2, 1]);
+  assert.deepEqual((await request(`/api/claim-records?id=${first.id}`, 'GET')).data, first);
+  assert.equal((await request('/api/claim-preview', 'GET')).data.csv, updatedCsv.csv);
+  const db = new DatabaseSync(filename);
+  t.after(() => db.close());
+  assert.throws(() => db.exec("UPDATE claim_records SET body = '{}'"), /append-only/);
+  assert.throws(() => db.exec('DELETE FROM claim_records'), /append-only/);
+  assert.throws(() => db.exec('INSERT OR REPLACE INTO claim_records SELECT * FROM claim_records WHERE version = 1'),
+    /appended/);
+  assert.ok(readAccessAudit(db, 0, 100).some(({ event }) => event.claimRecordIds?.includes(first.id) &&
+    event.operation === 'read-claim-record'));
+
+  const backupFile = `${filename}.backup.sqlite3`;
+  execFileSync('python3', ['-c', `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as target:
+    source.backup(target)`, filename, backupFile]);
+  const restoredApi = createWorkspaceApi(() => openWorkspace(backupFile));
+  t.after(restoredApi.close);
+  const restoredRequest = requestApi(restoredApi);
+  assert.deepEqual((await restoredRequest(`/api/claim-records?id=${first.id}`, 'GET')).data, first);
+  assert.equal((await restoredRequest('/api/claim-preview', 'GET')).data.csv, updatedCsv.csv);
+
+  db.exec("DROP TRIGGER claim_records_no_update; UPDATE claim_records SET body = '{}' WHERE version = 1");
+  assert.equal((await request(`/api/claim-records?id=${first.id}`, 'GET')).status, 500);
+});
+
+test('claim confirmation rolls back with the access audit if logging fails', async (t) => {
+  const filename = setup(t);
+  const api = createWorkspaceApi(() => openWorkspace(filename));
+  t.after(api.close);
+  const request = requestApi(api);
+  const patientId = INITIAL_PATIENTS[0].id;
+  const preview = (await request(`/api/claim-records?patientId=${patientId}`, 'GET')).data;
+  const db = new DatabaseSync(filename);
+  t.after(() => db.close());
+  db.exec(`CREATE TRIGGER fail_claim_audit BEFORE INSERT ON access_audit
+    WHEN json_extract(NEW.payload, '$.operation') = 'finalize' AND json_extract(NEW.payload, '$.status') = 200
+    BEGIN SELECT raise(ABORT, 'audit write failed'); END`);
+  assert.equal((await request('/api/workspace', 'POST', command(preview.revision, {
+    type: 'finalize', patientId, reviewHash: preview.reviewHash,
+  }))).status, 500);
+  assert.equal(db.prepare('SELECT count(*) AS count FROM claim_records').get()?.count, 0);
+  assert.equal(db.prepare('SELECT revision FROM workspace').get()?.revision, preview.revision);
 });

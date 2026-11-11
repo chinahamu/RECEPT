@@ -13,7 +13,7 @@ const categories = new Map<string, typeBillingCategoryCode>([
 ]);
 
 type ClinicalKind = keyof ClinicalMasterEntries;
-type StoredRow = { code: string; name: string; fields: string };
+type StoredRow = { import_id: number; code: string; name: string; fields: string };
 
 function disease(row: StoredRow, date: string): DiseaseEntry | undefined {
   const fields: string[] = JSON.parse(row.fields);
@@ -41,7 +41,7 @@ const toEntry = { b: disease, s: procedure };
 
 export function clinicalMasters(db: DatabaseSync) {
   const base = `
-    SELECT code, name, fields FROM master_rows WHERE import_id = (
+    SELECT import_id, code, name, fields FROM master_rows WHERE import_id = (
       SELECT id FROM master_imports WHERE kind = ? AND published_on <= ?
       ORDER BY published_on DESC, id DESC LIMIT 1
     )
@@ -52,7 +52,8 @@ export function clinicalMasters(db: DatabaseSync) {
   return {
     lookup<K extends ClinicalKind>(kind: K, code: string, date: string) {
       const row = lookup.get(kind, date, code) as StoredRow | undefined;
-      return row && toEntry[kind](row, date.replaceAll('-', '')) as ClinicalMasterEntries[K] | undefined;
+      const entry = row && toEntry[kind](row, date.replaceAll('-', '')) as ClinicalMasterEntries[K] | undefined;
+      return entry && row ? { ...entry, masterImportId: row.import_id } : undefined;
     },
     search<K extends ClinicalKind>(kind: K, query: string) {
       const result: ClinicalMasterEntries[K][] = [];

@@ -4,6 +4,7 @@ export type typeBillingCategoryCode = '11' | '12' | '13' | '14' | '21' | '30' | 
 
 export interface PatientDiagnosis {
   id: string;
+  masterImportId?: number;
   diseaseCode: string;
   diseaseName: string;
   icd10: string;
@@ -15,6 +16,7 @@ export interface PatientDiagnosis {
 
 export interface BillingLineItem {
   id: string;
+  masterImportId?: number;
   code: string;
   name: string;
   category: typeBillingCategoryCode;
