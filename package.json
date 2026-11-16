@@ -12,12 +12,13 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test": "node --import tsx --test src/utils/receiptEngine.test.ts server/workspace.test.ts server/dencalInbox.test.ts integration/recept-v1/contract.test.mjs",
-    "db:init": "python3 database/init.py",
+    "db:init": "node --import tsx tools/setup.ts",
     "audit": "node --import tsx server/reviewAccessAudit.ts",
     "db:backup": "node --import tsx server/backupCli.ts",
     "staff": "node --import tsx server/staffCli.ts",
     "test:integration": "node --test integration/recept-v1/contract.test.mjs",
-    "test:integration:e2e": "node integration/e2e/run.mjs"
+    "test:integration:e2e": "node integration/e2e/run.mjs",
+    "test:setup": "node --import tsx --test tools/setup.test.ts"
   },
   "dependencies": {
     "ajv": "8.18.0",

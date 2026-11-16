@@ -13,6 +13,23 @@ RECEPTは、一般病院の外来・入院業務を対象とする、院内サ�
 
 Node.js 22.13以降と Python 3.10以降（JSON関数が使えるSQLite）を使います。
 
+**初回は厚労省の全件マスター7種類を、リポジトリの `setup-input/masters/` に配置します。**
+
+```text
+setup-input/
+└─ masters/
+   ├─ s_YYYYMMDD.csv  医科診療行為
+   ├─ y_YYYYMMDD.csv  医薬品
+   ├─ t_YYYYMMDD.csv  特定器材
+   ├─ b_YYYYMMDD.txt  傷病名
+   ├─ z_YYYYMMDD.txt  修飾語
+   ├─ c_YYYYMMDD.csv  コメント
+   ├─ k.csv           病棟コード
+   └─ published-on.json  # k.csvの公式更新日を記載
+```
+
+`published-on.json` には配布元で確認した日付を指定します。記述例は `setup-input/published-on.example.json` を参照してください。
+
 ```sh
 npm ci
 npm run db:init
@@ -20,10 +37,13 @@ npm run staff -- create demo-admin admin
 npm run dev
 ```
 
-1. ターミナルに表示されたURLを同じPCのブラウザで開き、職員IDとアカウント作成時に表示されたパスワードでログインします。
-2. **院内サーバー・マスタ → 公式マスターの取り込み・参照** を開きます。画面のリンクから、厚労省の医科向け基本マスター7種類の全件版をダウンロードします。
-3. ZIPを解凍し、元のファイル名のCSV・TXTを1つずつ選びます。公式配布ページの更新日を確認し、「取り込む」を押します。
-4. 画面上部の「公式マスター 7/7種取込済み」を確認します。[公式配布元・対象ファイル・詳しい操作手順](docs/official-masters.md)
+`npm run db:init` の1回で **最新のDBスキーマ、初期サンプル、公式マスター7種類の取り込み** が完了します。取り込み結果は `data/initial-setup-report.json` に保存され、既存DBは上書きされません。管理者アカウント作成は次の `staff` コマンドで行います。
+
+ターミナルに表示されたURLを同じPCのブラウザで開き、職員IDと作成時に表示されたパスワードでログインします。
+
+**[ファイル配置・一括セットアップ詳細](setup-input/README.md)** ／ [公式配布元・マスターの詳細](docs/official-masters.md)
+
+稼働中のDBへ後から最新版を追加する場合は、従来どおり **院内サーバー・マスタ → 公式マスターの取り込み・参照** からCSV・TXTを個別に取り込めます。
 
 2026年11月の架空の外来データで、以下の操作を確認できます。
 
@@ -38,7 +58,7 @@ npm run dev
 
 DENCALと同じく、React／TypeScriptの画面、Node.js／TypeScriptのサーバー、SQLite、PythonのDB初期化を使用します。算定・点検・CSV生成はサーバーで実行します。患者、傷病名、算定明細、操作履歴はSQLiteに保存します。画面の操作履歴とJSONスナップショットには直近50件を表示・出力します。
 
-`db:init` は `data/recept.sqlite3` を作成し、既存ファイルの上書きを拒否します。サンプル患者は初回のAPIアクセス時に投入します。別のDBを使う場合は `npm run db:init -- data/another.sqlite3` で作成し、起動時に環境変数 `RECEPT_DB` に同じパスを指定します。
+`db:init` は `data/recept.sqlite3` を現行のDBスキーマバージョン7で作成し、公式マスター7種類と初期サンプル患者を取り込みます。既存ファイルの上書きは拒否します。別のDBは `npm run db:init -- --db data/another.sqlite3` または従来の位置引数形式で作成し、起動時に環境変数 `RECEPT_DB` に同じパスを指定してください。既存DBのスキーマ更新は従来どおり起動時に行います。
 
 この開発版は同じPCからの利用を前提としています。CSV・JSONの出力は既定で無効です。[開発時のデータ保護](docs/development-data-protection.md)に出力の有効化とDBファイルの保管条件をまとめています。オフライン切替は資格情報の表示を確認するためのデモです。点検・算定・CSVは操作確認用です。正式な算定・請求仕様への対応は今後進めます。
 

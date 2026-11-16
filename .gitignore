@@ -12,3 +12,6 @@ recept-demo-claims.csv
 recept-demo-claim-*.json
 recept-demo-snapshot-*.json
 __pycache__/
+
+# User-supplied official masters and optional private publication metadata
+/setup-input/masters/
